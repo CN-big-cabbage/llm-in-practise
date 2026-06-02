@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# 敏感配置（含密码）
+hosts.env
+
+# 离线包（太大）
+offline/
+
+# 临时文件
+*.tar
+*.tar.gz
+/tmp/
