@@ -28,13 +28,16 @@ if [[ -z "$CHART_FILE" ]]; then
 fi
 
 # values：指定 Pod CIDR
-# 混合架构关键：MTU 必须降，Tailscale (1280) - VXLAN 头 (50) = 1230
+# 混合架构: Tailscale (1280) - VXLAN 头 (50) = 1230
+# 同云内网: 1450（标准 VXLAN MTU）
+CALICO_MTU="${CALICO_MTU:-1230}"
+log "Calico MTU = ${CALICO_MTU}"
 VALUES=/tmp/calico-values.yaml
 cat > "$VALUES" <<EOF
 installation:
   enabled: true
   calicoNetwork:
-    mtu: 1230
+    mtu: ${CALICO_MTU}
     ipPools:
       - cidr: ${POD_CIDR}
         encapsulation: VXLAN

@@ -36,12 +36,12 @@ hostnamectl set-hostname "$NEW_HOSTNAME"
 log "写入 /etc/hosts"
 # 移除可能存在的旧条目
 sed -i '/k8s-master01\|k8s-node0[123]/d' /etc/hosts
-cat >> /etc/hosts <<EOF
-${MASTER_IP} ${MASTER_HOST}
-${NODE01_IP} ${NODE01_HOST}
-${NODE02_IP} ${NODE02_HOST}
-${NODE03_IP} ${NODE03_HOST}
-EOF
+{
+  echo "${MASTER_IP} ${MASTER_HOST}"
+  [[ -n "${NODE01_IP:-}" ]] && echo "${NODE01_IP} ${NODE01_HOST}"
+  [[ -n "${NODE02_IP:-}" ]] && echo "${NODE02_IP} ${NODE02_HOST}"
+  [[ -n "${NODE03_IP:-}" ]] && echo "${NODE03_IP} ${NODE03_HOST}"
+} >> /etc/hosts
 
 # ---------- 3. 关 swap ----------
 log "关闭 swap"

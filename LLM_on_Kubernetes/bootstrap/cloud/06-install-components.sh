@@ -16,6 +16,11 @@ log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
 CHARTS_DIR="$ROOT_DIR/charts"
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
+# 自动识别架构：NODE02_IP 为空即 2 节点云上部署
+IS_2NODE=false
+[[ -z "${NODE02_IP:-}" ]] && IS_2NODE=true
+log "部署模式: $([[ $IS_2NODE == true ]] && echo '2 节点（master + 1 worker）' || echo '4 节点混合架构')"
+
 # 前置检查：节点标签必须打过
 if ! kubectl get nodes -L topology.kubernetes.io/zone | grep -qE 'cloud|local'; then
   echo "未检测到 zone 标签，请先跑 06a-label-nodes.sh" >&2
@@ -28,10 +33,30 @@ CHART=$(ls "$CHARTS_DIR"/metallb-*.tgz | head -1)
 helm upgrade --install metallb "$CHART" -n metallb-system --create-namespace --wait
 sleep 5
 
-log "配置 MetalLB 双 IP 池"
-log "  cloud 池: ${METALLB_CLOUD_RANGE}（给推理 / MinIO Service）"
-log "  local 池: ${METALLB_LOCAL_RANGE}（给 Ingress / Open-WebUI）"
-kubectl apply -f - <<EOF
+if [[ $IS_2NODE == true ]]; then
+  log "配置 MetalLB 单 IP 池: ${METALLB_CLOUD_RANGE}"
+  kubectl apply -f - <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: cloud-pool
+  namespace: metallb-system
+spec:
+  addresses: [ "${METALLB_CLOUD_RANGE}" ]
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: cloud-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools: [ "cloud-pool" ]
+EOF
+else
+  log "配置 MetalLB 双 IP 池"
+  log "  cloud 池: ${METALLB_CLOUD_RANGE}（给推理 / MinIO Service）"
+  log "  local 池: ${METALLB_LOCAL_RANGE}（给 Ingress / Open-WebUI）"
+  kubectl apply -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -48,7 +73,6 @@ metadata:
 spec:
   addresses: [ "${METALLB_LOCAL_RANGE}" ]
 ---
-# 只让云节点 ARP 通告 cloud-pool
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -60,7 +84,6 @@ spec:
     - matchLabels:
         topology.kubernetes.io/zone: cloud
 ---
-# 只让本地节点 ARP 通告 local-pool
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -72,17 +95,28 @@ spec:
     - matchLabels:
         topology.kubernetes.io/zone: local
 EOF
+fi
 
 # ================= Ingress-Nginx =================
-log "安装 Ingress-Nginx（钉到本地节点，从 local-pool 拿 IP）"
 CHART=$(ls "$CHARTS_DIR"/ingress-nginx-*.tgz | head -1)
-helm upgrade --install ingress-nginx "$CHART" \
-  -n ingress-nginx --create-namespace \
-  --set controller.service.type=LoadBalancer \
-  --set controller.service.annotations."metallb\.universe\.tf/address-pool"=local-pool \
-  --set controller.ingressClassResource.default=true \
-  --set controller.nodeSelector."topology\.kubernetes\.io/zone"=local \
-  --wait
+if [[ $IS_2NODE == true ]]; then
+  log "安装 Ingress-Nginx（2 节点模式：任意节点，cloud-pool）"
+  helm upgrade --install ingress-nginx "$CHART" \
+    -n ingress-nginx --create-namespace \
+    --set controller.service.type=LoadBalancer \
+    --set controller.service.annotations."metallb\.universe\.tf/address-pool"=cloud-pool \
+    --set controller.ingressClassResource.default=true \
+    --wait
+else
+  log "安装 Ingress-Nginx（4 节点模式：钉本地节点，local-pool）"
+  helm upgrade --install ingress-nginx "$CHART" \
+    -n ingress-nginx --create-namespace \
+    --set controller.service.type=LoadBalancer \
+    --set controller.service.annotations."metallb\.universe\.tf/address-pool"=local-pool \
+    --set controller.ingressClassResource.default=true \
+    --set controller.nodeSelector."topology\.kubernetes\.io/zone"=local \
+    --wait
+fi
 
 # ================= OpenEBS =================
 log "安装 OpenEBS LocalPV"
