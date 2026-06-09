@@ -69,25 +69,41 @@ IMAGES=(
   "quay.io/minio/mc:${MC_VERSION}"
 )
 
-# 单独 pull 每个镜像（便于失败时重试单个）
+# 单独 pull 每个镜像（best-effort：失败的镜像跳过，末尾汇总，不中断脚本）
+FAILED_IMAGES=()
+SUCCEEDED_IMAGES=()
 for img in "${IMAGES[@]}"; do
   if docker image inspect "$img" >/dev/null 2>&1; then
     log "已存在，跳过：$img"
+    SUCCEEDED_IMAGES+=("$img")
     continue
   fi
   log "拉取：$img"
+  PULLED=false
   for i in 1 2 3; do
+    # 关键：直接判断 docker pull 退出码，不要管道任何过滤命令
     if docker pull --platform=linux/amd64 "$img"; then
+      PULLED=true
       break
     fi
     log "第 $i 次失败，等 5s 后重试"
     sleep 5
-    if [[ $i -eq 3 ]]; then
-      echo "拉取失败：$img" >&2
-      exit 1
-    fi
   done
+  if [[ "$PULLED" == "true" ]]; then
+    SUCCEEDED_IMAGES+=("$img")
+  else
+    log "⚠️  ${img} 三次重试均失败，标记为失败、继续往下拉"
+    FAILED_IMAGES+=("$img")
+  fi
 done
+
+log "拉取统计：成功 ${#SUCCEEDED_IMAGES[@]} / 失败 ${#FAILED_IMAGES[@]}"
+if [[ ${#FAILED_IMAGES[@]} -gt 0 ]]; then
+  log "失败列表（请在云上用 cloud/pull-missing-images.sh 补拉，或换镜像源）："
+  for img in "${FAILED_IMAGES[@]}"; do
+    echo "    - $img"
+  done
+fi
 
 OUT="$IMG_DIR/k8s-all-images.tar"
 if [[ -f "$OUT" ]]; then
@@ -95,7 +111,13 @@ if [[ -f "$OUT" ]]; then
   rm -f "$OUT"
 fi
 
-log "打包所有镜像到 $OUT"
-docker save -o "$OUT" "${IMAGES[@]}"
+log "打包所有镜像到 $OUT（${#SUCCEEDED_IMAGES[@]} 个）"
+docker save -o "$OUT" "${SUCCEEDED_IMAGES[@]}"
 log "完成，大小："
 du -sh "$OUT"
+
+if [[ ${#FAILED_IMAGES[@]} -gt 0 ]]; then
+  log "⚠️  注意：${#FAILED_IMAGES[@]} 个镜像未拉到，部署到 K8s 时这些组件会失败。"
+  log "   补救方法：在云节点上跑 cloud/pull-missing-images.sh"
+  exit 2   # 非零退出码标记部分失败
+fi

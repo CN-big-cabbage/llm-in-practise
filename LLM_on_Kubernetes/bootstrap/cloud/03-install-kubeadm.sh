@@ -12,7 +12,8 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-DEBS_DIR="$ROOT_DIR/debs"
+DEBS_DIR="$ROOT_DIR/offline/debs"
+[[ ! -d "$DEBS_DIR" && -d "$ROOT_DIR/debs" ]] && DEBS_DIR="$ROOT_DIR/debs"
 log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
 
 if ! ls "$DEBS_DIR"/kubeadm_*.deb >/dev/null 2>&1; then

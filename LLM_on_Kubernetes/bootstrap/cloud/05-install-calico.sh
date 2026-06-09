@@ -9,8 +9,10 @@ source "$ROOT_DIR/hosts.env"
 
 log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
 
-CHARTS_DIR="$ROOT_DIR/charts"
-BINS_DIR="$ROOT_DIR/bins"
+CHARTS_DIR="$ROOT_DIR/offline/charts"
+[[ ! -d "$CHARTS_DIR" && -d "$ROOT_DIR/charts" ]] && CHARTS_DIR="$ROOT_DIR/charts"
+BINS_DIR="$ROOT_DIR/offline/bins"
+[[ ! -d "$BINS_DIR" && -d "$ROOT_DIR/bins" ]] && BINS_DIR="$ROOT_DIR/bins"
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # Helm 安装

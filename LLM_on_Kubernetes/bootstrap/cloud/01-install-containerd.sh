@@ -11,7 +11,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-BINS_DIR="$ROOT_DIR/bins"
+BINS_DIR="$ROOT_DIR/offline/bins"
+# 兼容旧路径：如果 offline/bins/ 不存在但 bins/ 存在，用 bins/
+[[ ! -d "$BINS_DIR" && -d "$ROOT_DIR/bins" ]] && BINS_DIR="$ROOT_DIR/bins"
 log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
 
 # ---------- containerd ----------

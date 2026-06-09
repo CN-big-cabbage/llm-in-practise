@@ -23,8 +23,10 @@ fi
 export KUBECONFIG=/etc/kubernetes/admin.conf
 log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
 
-BINS_DIR="$ROOT_DIR/bins"
-MODEL_SRC="$ROOT_DIR/models/${MODEL_DIR_NAME}"     # offline/models/Qwen3-8B
+BINS_DIR="$ROOT_DIR/offline/bins"
+[[ ! -d "$BINS_DIR" && -d "$ROOT_DIR/bins" ]] && BINS_DIR="$ROOT_DIR/bins"
+MODEL_SRC="$ROOT_DIR/offline/models/${MODEL_DIR_NAME}"
+[[ ! -d "$MODEL_SRC" && -d "$ROOT_DIR/models/${MODEL_DIR_NAME}" ]] && MODEL_SRC="$ROOT_DIR/models/${MODEL_DIR_NAME}"
 ALIAS_NAME="models"
 
 # ---------- 1. 安装 mc ----------

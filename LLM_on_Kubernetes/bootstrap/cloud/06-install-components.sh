@@ -13,7 +13,8 @@ source "$ROOT_DIR/versions.env"
 source "$ROOT_DIR/hosts.env"
 
 log() { echo -e "\033[36m[$(date +%H:%M:%S)] $*\033[0m"; }
-CHARTS_DIR="$ROOT_DIR/charts"
+CHARTS_DIR="$ROOT_DIR/offline/charts"
+[[ ! -d "$CHARTS_DIR" && -d "$ROOT_DIR/charts" ]] && CHARTS_DIR="$ROOT_DIR/charts"
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # 自动识别架构：NODE02_IP 为空即 2 节点云上部署
