@@ -235,6 +235,92 @@ sudo bash cloud/check.sh
 
 集群就绪后，按 `Inference_Platfrom/PRACTICE_GUIDE.md` 的 10 个阶段实践。
 
+---
+
+## 可选：升级 NVIDIA 驱动
+
+如果你的 vLLM 镜像需要更新的 CUDA（如 **v0.11.2 需要 CUDA >= 12.9 → 驱动 >= 580**），但云上预装的驱动只有 570（对应 CUDA 12.8），需要升级。
+
+### 何时需要
+
+| 驱动版本 | 支持的 CUDA | 能跑的 vLLM |
+|---|---|---|
+| 535 / 545 | <= 12.4 | <= v0.8.x（不支持 Qwen3） |
+| 570 | 12.8 | v0.11.0（最高） |
+| **580+** | **12.9 / 13.0** | **v0.11.2+（含 Qwen3 全功能）** |
+
+跑 `nvidia-smi` 看当前驱动版本，对照表决定要不要升。
+
+### 升级脚本
+
+```bash
+ssh ubuntu@<NODE_PUBLIC>
+cd /opt/llm-in-practise/LLM_on_Kubernetes/bootstrap
+
+# 升级到 580，会自动 reboot
+sudo bash cloud/upgrade-nvidia-driver.sh 580
+
+# 或跳过 reboot 自己手动重启
+sudo bash cloud/upgrade-nvidia-driver.sh 580 --skip-reboot
+sudo reboot
+
+# 或无人值守（CI 用）
+sudo bash cloud/upgrade-nvidia-driver.sh 580 --yes
+```
+
+脚本干的事：
+1. 检测当前驱动版本，如果已 >= 目标版本就跳过
+2. 优先用 NVIDIA 官方 cuda-keyring（国内可达）
+3. 回退到 PPA `graphics-drivers/ppa`（万一前者拉不到）
+4. `apt install nvidia-driver-XXX`
+5. 提示或自动 reboot
+
+### 升级顺序建议（K8s 集群中）
+
+**强烈推荐先 worker、后 master**，集群不全离线：
+
+```bash
+# Step 1：worker 上 drain + 升级
+ssh ubuntu@<WORKER_PUBLIC>
+kubectl drain $(hostname) --ignore-daemonsets --delete-emptydir-data --force   # 注意需要 kubectl 配置
+sudo bash /opt/llm-in-practise/LLM_on_Kubernetes/bootstrap/cloud/upgrade-nvidia-driver.sh 580
+# 自动 reboot
+
+# Step 2：等 worker 起来 + 自动 uncordon
+ssh ubuntu@<MASTER_PUBLIC>
+kubectl get nodes   # worker 应该 Ready
+kubectl uncordon <worker-hostname>
+
+# Step 3：master 上同样操作
+sudo bash /opt/llm-in-practise/LLM_on_Kubernetes/bootstrap/cloud/upgrade-nvidia-driver.sh 580
+# 自动 reboot，期间 kubectl 短暂不可用（2-3 分钟）
+```
+
+### 升级后验证
+
+```bash
+nvidia-smi | head -3
+# 期望：Driver Version: 580.xx.xx     CUDA Version: 12.9 / 13.0
+
+# 集群恢复
+kubectl get nodes
+kubectl get pods -A | grep -v "Running\|Completed"   # 应为空
+
+# GPU 仍然可调度
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": gpu="}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}'
+```
+
+### 升级踩坑
+
+| 现象 | 处理 |
+|---|---|
+| `apt install nvidia-driver-580` 报源里没有 | 脚本会自动加 PPA，PPA 在国内有时慢；改用 cuda-keyring（脚本已优先用） |
+| 装完 `nvidia-smi` 还是旧版本 | 没 reboot；脚本默认 10 秒后自动 reboot |
+| reboot 后 `nvidia-smi` Failed to initialize | nouveau 没禁用，`sudo modprobe -r nouveau && sudo reboot` |
+| 卡在 BIOS Secure Boot | 第一次装驱动需要在 BIOS 输 MOK 密码；云上一般没这问题 |
+| GPU Operator Pod CrashLoop | 驱动跟 container-toolkit 版本错位；`kubectl delete pod -n gpu-operator --all`，等自愈 |
+| `kubectl drain` 卡在 PDB | `--disable-eviction` 强制驱逐 |
+
 ## 常见踩坑速查
 
 | 现象 | 原因 / 处理 |
