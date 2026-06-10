@@ -63,13 +63,16 @@ git clone https://github.com/CN-big-cabbage/llm-in-practise.git
 cd llm-in-practise/LLM_on_Kubernetes/bootstrap
 
 bash local/01-download-binaries.sh    # 二进制 + deb
-bash local/02-pull-images.sh          # 镜像 → offline/images/k8s-all-images.tar
+bash local/02-pull-images.sh          # 默认：底座 + 推理基础（~12GB）
+# bash local/02-pull-images.sh --full # 全套：含监控/LMCache/Router/WebUI（~28GB）
 bash local/03-pull-charts.sh          # Helm chart
-bash local/04-download-model.sh       # Qwen3-8B
+bash local/04-download-model.sh       # Qwen3-8B (~16GB)
 bash local/05-package.sh              # 打包 offline.tar.gz
 ```
 
-产物：`offline.tar.gz`（约 25-30GB），传网盘 / 对象存储。
+📘 **完整镜像清单** → 见 [`IMAGES.md`](./IMAGES.md)（每个阶段需要哪些镜像、大小估算、补救方案）
+
+产物：`offline.tar.gz`（默认约 25-30GB，--full 约 45-50GB），传网盘 / 对象存储。
 
 ## 阶段 B：开机器、配凭据
 
