@@ -1,41 +1,80 @@
 # Inference_Platfrom 实践指南（执行版）
 
-> 适配环境：2 节点（master + node01），各 1 张 RTX 3090 + 驱动 580 + CUDA 13.0
-> 当前已完成：阶段 1（01-Base/vLLM 跑通，curl 验证 OK）
-> YAML 已批量替换：节点名、mc 镜像、Secret base64
+> 适配环境：优云智算 2 节点云上部署
+> YAML 已批量替换：节点名、mc 镜像版本、Secret base64（详见底座 DEPLOYMENT.md）
 
 ## 全局信息（用到时查）
 
-```bash
-# SSH（公网 IP 公开 OK；密码请用本地 ssh-config 或环境变量保存，不要写进文件）
-master  : ssh ubuntu@<MASTER_PUBLIC>   内网 10.60.37.205
-worker  : ssh ubuntu@<WORKER_PUBLIC>   内网 10.60.236.197
+### 节点信息
 
+| 节点 | SSH | 内网 IP | 配置 |
+|---|---|---|---|
+| master | `ssh ubuntu@117.50.186.132` | `10.60.37.205` | 16C 64G + RTX 3090 24G |
+| worker | `ssh ubuntu@117.50.205.129` | `10.60.236.197` | 16C 64G + RTX 3090 24G |
+
+> 密码请用本地 ssh-config 或环境变量保存，不要 commit 到文件
+
+### 软件栈
+
+| 组件 | 版本 |
+|---|---|
+| OS | Ubuntu 22.04.4 LTS (kernel 5.15.0-113-generic) |
+| NVIDIA Driver | **580.142** |
+| CUDA | **13.0** |
+| Kubernetes | v1.31.4 |
+| containerd | v1.7.22 |
+| Calico | v3.28.2（VXLAN MTU=1450） |
+| vLLM 镜像 | `vllm/vllm-openai:v0.11.2`（要 CUDA ≥ 12.9） |
+
+### 集群运行时信息
+
+```bash
 # 命名空间
 kubectl 操作主要在 namespace: llm-inference
 
-# LoadBalancer IP
+# LoadBalancer IP（MetalLB 分配段：10.60.37.200-220）
 Ingress  : 10.60.37.210      curl 时加 -H "Host: vllm.magedu.com"
 MinIO    : 10.60.37.211      account: admin / admin123456
 MinIO UI : 10.60.37.212:9001
 
-# 模型路径（MinIO）
+# 模型路径（MinIO 上）
 llm-models/Qwen3-8B/    主 bucket（Inference_Platfrom 用）
 qwen/Qwen3-8B/          复制份（level-1 用）
 
 # 模型路径（节点本地，DaemonSet 预热后生成）
 /data/models/qwen3-8b/
 
-# 当前镜像版本
-vllm/vllm-openai:v0.11.2           ✓ 已在两节点 containerd
-minio/mc:RELEASE.2024-10-08T09-37-26Z  ✓ 已在两节点
-minio/mc:RELEASE.2025-08-13T08-35-41Z  ✓ 备用
+# 当前 containerd 已有镜像版本
+vllm/vllm-openai:v0.11.2                ✓ 两节点
+minio/mc:RELEASE.2024-10-08T09-37-26Z   ✓ 两节点
+minio/mc:RELEASE.2025-08-13T08-35-41Z   ✓ 两节点（备用）
 ```
+
+### 浏览器访问（可选）
+
+集群 LoadBalancer IP 都是云内网，在 master 上 socat 转发暴露到公网：
+
+```bash
+ssh ubuntu@117.50.186.132
+sudo apt install -y socat
+
+# 后台转发
+sudo nohup socat TCP-LISTEN:9001,fork,reuseaddr TCP:10.60.37.212:9001 > /tmp/socat-9001.log 2>&1 &  # MinIO Console
+sudo nohup socat TCP-LISTEN:9000,fork,reuseaddr TCP:10.60.37.211:9000 > /tmp/socat-9000.log 2>&1 &  # MinIO API
+sudo nohup socat TCP-LISTEN:80,fork,reuseaddr TCP:10.60.37.210:80 > /tmp/socat-80.log 2>&1 &        # Ingress
+
+# 云控制台开 80 / 9000 / 9001 端口安全组
+```
+
+浏览器访问：
+- MinIO Console: http://117.50.186.132:9001
+- Ingress（推理 API）: http://117.50.186.132/  + Host header `vllm.magedu.com`（用 Postman 或 ModHeader 插件）
 
 ## 阶段总览
 
 | # | 目录 | 实践目的 | 难度 | 你的硬件适配 |
 |---|---|---|---|---|
+| **1** | `01-Base/` | **PVC + InitContainer + vLLM 基础部署** | ★ | 单副本，固定 worker 节点 |
 | 2 | `02-Preloader/` | 模型从 PVC 切到 HostPath，Pod 秒启 | ★★ | 2 节点都跑 preloader |
 | 3 | `03-MultiReplica/` | StatefulSet 2 副本，理解 headless service | ★★ | replicas=2 正好用满 2 卡 |
 | 4 | `04-BenchMark/` | 用 vllm bench 建性能基线 | ★★ | 跑在任意节点 |
@@ -45,6 +84,155 @@ minio/mc:RELEASE.2025-08-13T08-35-41Z  ✓ 备用
 | 8 | `08-LLM-Router/` | Cache-Aware 路由 | ★★★★ | **拉 llm-d 或 router 镜像** |
 | 9 | `09-Canary-Deployment/` | Argo Rollouts 金丝雀 | ★★★★ | **需先装 Argo Rollouts** + 改 replicas |
 | 10 | `Open-WebUI/` | 浏览器聊天界面 | ★ | 拉 open-webui 镜像 |
+
+---
+
+## 阶段 1：vLLM 基础部署（`01-Base/vLLM/`）
+
+**实践目的**：跑通最简单的 vLLM 推理服务：PVC 存模型 + InitContainer 从 MinIO 拉模型 + 主容器加载到 GPU + Service + Ingress 暴露 OpenAI API。
+这是 K8s 推理部署的最朴素形态，理解后续阶段都是在此基础上的演进。
+
+**核心组件**：
+- **`vllm-model-pvc.yaml`**：OpenEBS LocalPV 30Gi PVC（`volumeBindingMode: WaitForFirstConsumer`，跟 Pod 走）
+- **`vllm-deployment.yaml`**：
+  - InitContainer `model-puller`：用 `mc mirror` 从 MinIO 拉 Qwen3-8B 到 PVC（带 `.ready` 文件做幂等）
+  - 主容器 `vllm`：`vllm/vllm-openai:v0.11.2` 加载模型、起 OpenAI API on :8000
+  - `nodeSelector: kubernetes.io/hostname=k8s-node01` 固定节点（与 LocalPV 同节点）
+- **`vllm-ingress.yaml`**：Ingress 暴露 `vllm.magedu.com` → vllm-service:8000
+
+### 前置准备
+
+```bash
+ssh ubuntu@117.50.186.132
+cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/01-Base/vLLM
+
+# 1. 创建命名空间
+kubectl create namespace llm-inference
+
+# 2. 创建 MinIO Secret（用当前 MinIO 实际凭据，覆盖仓库里的旧 modelskey）
+kubectl create secret generic minio-credentials -n llm-inference \
+  --from-literal=MINIO_ACCESS_KEY=admin \
+  --from-literal=MINIO_SECRET_KEY=admin123456 \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# 验证
+kubectl get secret minio-credentials -n llm-inference -o yaml | grep -A 2 data
+```
+
+### 操作步骤
+
+```bash
+# 1. 部署 PVC（initial Pending → WaitForFirstConsumer，正常）
+kubectl apply -f vllm-model-pvc.yaml
+kubectl get pvc -n llm-inference
+# 期望：qwen3-8b-model-pvc-vllm   Pending   ... openebs-hostpath
+# 这是 OpenEBS LocalPV 的设计：等 Pod 引用后才 Bound
+
+# 2. 部署 Deployment + Ingress
+kubectl apply -f vllm-deployment.yaml
+kubectl apply -f vllm-ingress.yaml
+
+# 3. 监控 Pod 状态
+kubectl get pods -n llm-inference -w
+# 期望流程：Init:0/1 → PodInitializing → 1/1 Running
+```
+
+### 验证方法
+
+**Step 1：InitContainer 拉模型（1-3 分钟）**
+
+```bash
+POD=$(kubectl get pods -n llm-inference -l app=vllm-qwen3-8b -o name | head -1)
+kubectl logs -n llm-inference $POD -c model-puller -f
+# 期望看到：
+#   [xxx] 首次同步：从MinIO下载qwen/qwen3-8b ...
+#   [xxx] 同步完成。总大小: 15G（或类似）
+#   [xxx] 关键文件校验通过
+```
+
+**Step 2：vLLM 加载模型（30-90 秒）**
+
+```bash
+kubectl logs -n llm-inference $POD -c vllm -f
+# 期望看到：
+#   INFO ... Loading model from /data/models/qwen3-8b
+#   INFO ... Loaded weights ...
+#   INFO ... Application startup complete
+#   INFO ... Uvicorn running on http://0.0.0.0:8000
+```
+
+**Step 3：等 Pod Ready**
+
+```bash
+kubectl wait --for=condition=Ready pod -l app=vllm-qwen3-8b -n llm-inference --timeout=10m
+kubectl get pods -n llm-inference
+# 期望：vllm-qwen3-8b-xxx  1/1  Running
+```
+
+**Step 4：调 API 测试**
+
+```bash
+INGRESS_IP=10.60.37.210
+
+# 列出模型
+curl -s http://$INGRESS_IP/v1/models -H "Host: vllm.magedu.com" | jq
+
+# 中文对话
+curl -s http://$INGRESS_IP/v1/chat/completions \
+  -H "Host: vllm.magedu.com" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-8b",
+    "messages": [{"role":"user","content":"你好，一句话介绍一下自己"}],
+    "max_tokens": 200,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }' | jq -r '.choices[0].message.content'
+```
+
+**期望响应**（关思考模式后直接回答）：
+```
+你好！我是通义千问（Qwen），由阿里云开发的人工智能助手...
+```
+
+如果**不关思考模式**，Qwen3 默认会先 `<think>...</think>` 推理过程再给答案：
+```json
+{
+  "choices": [{
+    "message": {
+      "content": "<think>\n好的，用户让我介绍一下自己...\n</think>\n\n你好！我是..."
+    }
+  }]
+}
+```
+
+### ✅ 阶段 1 完成清单
+
+- [x] PVC 状态 Bound（Pod 引用后自动绑定）
+- [x] InitContainer 日志「关键文件校验通过」
+- [x] vLLM 日志「Uvicorn running on http://0.0.0.0:8000」
+- [x] `kubectl get pods` 显示 `1/1 Running`
+- [x] `curl /v1/models` 列出 `qwen3-8b`
+- [x] `curl /v1/chat/completions` 返回中文回复
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理（已在脚本/文档里固化） |
+|---|---|---|
+| Pod Pending `kubernetes.io/hostname` 不匹配 | 原 YAML 节点名 `k8s-node01.magedu.com` | 批量 sed 改成 `k8s-node01` |
+| InitContainer 401 Unauthorized | YAML 里 Secret base64 是旧的 `modelskey` | 用 `kubectl create secret` 直接覆盖 |
+| vLLM CrashLoop `Model architectures ['Qwen3ForCausalLM'] are not supported` | 镜像 `v0.6.3.post1` 不支持 Qwen3 | 改成 **`v0.11.2`**（vLLM ≥ 0.8.5 才支持） |
+| CrashLoop `cuda>=12.9 not satisfied` | v0.11.2 要 CUDA 12.9，节点驱动 570 只支持 12.8 | **升级驱动到 580**（用 `cloud/upgrade-nvidia-driver.sh 580`） |
+| InitContainer 拉模型卡住 | MinIO `minio.minio.svc.cluster.local` 解析失败 | 看 CoreDNS / 检查 Service IP `kubectl -n minio get svc` |
+| livenessProbe 一直 fail | 模型加载 > 5 分钟 | YAML 已设 `initialDelaySeconds: 300`，足够 |
+| Ingress 404 | 没传 Host header | curl 必须加 `-H "Host: vllm.magedu.com"` |
+
+### 进入下一阶段前清理（可选）
+
+阶段 1 用 PVC，阶段 2 改用 HostPath。阶段 2 操作步骤会先 `kubectl delete` 阶段 1 的 Deployment，**PVC 可以保留**作为备份，或者：
+
+```bash
+kubectl delete pvc qwen3-8b-model-pvc-vllm -n llm-inference --ignore-not-found
+```
 
 ---
 
@@ -60,7 +248,7 @@ minio/mc:RELEASE.2025-08-13T08-35-41Z  ✓ 备用
 ### 操作步骤
 
 ```bash
-ssh ubuntu@<MASTER_PUBLIC>
+ssh ubuntu@117.50.186.132
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/02-Preloader
 
 # 1. 清掉阶段 1 的 vLLM（保留 PVC 也可以，本阶段不用）
@@ -583,12 +771,12 @@ kubectl wait --for=condition=Ready pod -l app=open-webui -n llm-inference --time
 ```bash
 # Ingress host 是 openwebui.magedu.com
 # 选项 A：本地 hosts 文件加映射
-echo "<MASTER_PUBLIC> openwebui.magedu.com" | sudo tee -a /etc/hosts
+echo "117.50.186.132 openwebui.magedu.com" | sudo tee -a /etc/hosts
 # 浏览器：http://openwebui.magedu.com
 
 # 选项 B：socat 转发，不用改 hosts
-ssh ubuntu@<MASTER_PUBLIC> 'sudo nohup socat TCP-LISTEN:8080,fork,reuseaddr TCP:10.60.37.210:80 &'
-# 浏览器：http://<MASTER_PUBLIC>:8080 + 在浏览器加 Host header（用 ModHeader 插件）
+ssh ubuntu@117.50.186.132 'sudo nohup socat TCP-LISTEN:8080,fork,reuseaddr TCP:10.60.37.210:80 &'
+# 浏览器：http://117.50.186.132:8080 + 在浏览器加 Host header（用 ModHeader 插件）
 
 # 首次注册账号，开始聊天，能调用 qwen3-8b
 ```
