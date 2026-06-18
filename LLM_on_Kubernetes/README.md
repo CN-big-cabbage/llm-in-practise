@@ -22,11 +22,12 @@ cd llm-in-practise/LLM_on_Kubernetes
 
 ```
 LLM_on_Kubernetes/
+├── QUICKSTART.md                      ← ★ 从这里开始（5 分钟上手指引）★
 ├── README.md                          ← 当前文件：概念参考手册（原课程 3 节点环境）
 ├── bootstrap/
 │   └── README.md                      ← 集群搭建：混合架构（本地 PVE + 云端 GPU）
 └── Inference_Platfrom/
-    ├── PRACTICE_GUIDE.md              ← ★ 实操手册（推荐从这里开始）★
+    ├── PRACTICE_GUIDE.md              ← 完整实操手册（10 阶段逐步命令 + 踩坑记录）
     ├── PRACTICE_PLAN.md               ← 阶段规划速览
     ├── README.md                      ← 概念详解（与本文档互补）
     ├── 01-Base/ … 09-Canary-Deployment/  ← 各阶段 YAML 文件
@@ -37,6 +38,7 @@ LLM_on_Kubernetes/
 
 | 我的目标 | 推荐文档 |
 |---|---|
+| **第一次上手，不知从哪开始** | [`QUICKSTART.md`](QUICKSTART.md) |
 | **复现完整实操，直接跑命令** | [`Inference_Platfrom/PRACTICE_GUIDE.md`](Inference_Platfrom/PRACTICE_GUIDE.md) |
 | 搭建 K8s 集群（PVE + 云端 GPU 混合） | [`bootstrap/README.md`](bootstrap/README.md) |
 | 理解 GPU Operator 原理、MinIO 模型管理 | 本文件（往下看） |
