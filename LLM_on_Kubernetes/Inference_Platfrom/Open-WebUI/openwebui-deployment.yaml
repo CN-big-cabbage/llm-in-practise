@@ -21,9 +21,9 @@ spec:
             - containerPort: 8080
               name: http
           env:
-            # 核心配置：指向 Qwen3 的 OpenAI 兼容 API
+            # 核心配置：指向 Qwen3 的 OpenAI 兼容 API（vllm-stable 是 Rollout stable service）
             - name: OPENAI_API_BASE_URL
-              value: "http://vllm-service.llm-inference.svc.cluster.local:8000/v1"
+              value: "http://vllm-stable.llm-inference.svc.cluster.local:8000/v1"
             - name: OPENAI_API_KEY
               value: "EMPTY"  # vLLM 默认不验证 API Key
             # 禁用其他默认后端，强制使用 OpenAI 模式
@@ -33,18 +33,10 @@ spec:
               value: "True"
             # 可选：预设默认模型
             - name: DEFAULT_MODEL
-              #value: "Qwen3-8B"
               value: "qwen3-8b"
             # 持久化数据（对话记录、用户配置）
             - name: DATA_DIR
               value: "/app/backend/data"
-            # 代理配置
-            - name: HTTP_PROXY
-              value: "http://172.29.0.1:10808"
-            - name: HTTPS_PROXY
-              value: "http://172.29.0.1:10808"
-            - name: NO_PROXY
-              value: "localhost,127.0.0.1,::1,.svc.cluster.local,10.96.0.0/12,172.29.0.0/16,192.168.0.0/16,*.magedu.com,10.244.0.0/16"
           volumeMounts:
             - name: data
               mountPath: /app/backend/data

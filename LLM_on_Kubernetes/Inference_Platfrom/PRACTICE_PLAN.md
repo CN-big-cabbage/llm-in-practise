@@ -239,10 +239,23 @@ kubectl logs -n llm-inference -l job-name=benchmark-client -f
 - 真要切多份，要么用更小模型（Qwen3-1.8B），要么开 INT8/INT4 量化
 - Time-Slicing 不是真隔离，只是分时；显存仍然共享，超就 OOM
 
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| Pod `FailedMount: configmap "time-slicing-config" not found` | patch 命令 `name` 与 YAML 中 ConfigMap 名 `time-slicing-rtx3090` 不一致 | patch 改为 `name: time-slicing-rtx3090, default: rtx-3090` |
+| 手动 `scale --replicas=2` 后 pod-1 瞬间消失 | KEDA Prometheus 指标获取失败，兜底缩回 minReplicas=1 | 验证前先暂停 KEDA：`kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused=true --overwrite` |
+
 ### 完成后
-- [ ] 单节点显示 nvidia.com/gpu=N（N>1）
-- [ ] 多副本 vLLM 调度到同一节点不冲突
-- [ ] 回头跑阶段 5 KEDA，能真正扩容
+- [x] 单节点显示 `nvidia.com/gpu=2`（Time-Slicing replicas=2 生效）
+- [x] `vllm-qwen3-8b-0`（k8s-master01）和 `vllm-qwen3-8b-1`（k8s-node01）均 `1/1 Running`
+- [x] API 调用正常返回中文回复
+- [ ] （可选）回头跑阶段 5 KEDA，验证能真正扩容到 4 副本
+
+> 进入阶段 7 前恢复 KEDA：
+> ```bash
+> kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused- --overwrite
+> ```
 
 ---
 
@@ -356,7 +369,7 @@ kubectl apply -f Open-WebUI/
 | 3  MultiReplica | ☐ | | 2 副本 |
 | 4  BenchMark | ☐ | | 基线数据 |
 | 5  KEDA | ☐ | | 自动扩缩 |
-| 6  Time-Slicing | ☐ | | GPU 共享 |
+| 6  Time-Slicing | ✅ | 2026-06-18 | GPU 共享，双节点各 gpu=2 |
 | 7  L1-Cache | ☐ | | LMCache + APC |
 | 8  LLM-Router | ☐ | | Cache-Aware |
 | 9  Canary | ☐ | | Argo Rollouts |

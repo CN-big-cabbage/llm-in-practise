@@ -1,16 +1,42 @@
 # Inference_Platfrom 实践指南（执行版）
 
-> 适配环境：优云智算 2 节点云上部署
-> YAML 已批量替换：节点名、mc 镜像版本、Secret base64（详见底座 DEPLOYMENT.md）
+> **本文档是 2 节点云上 GPU 集群的完整实操手册**，记录了从 vLLM 基础部署到 Open-WebUI 的全部 10 个阶段。
+> 每个阶段包含：操作步骤、验证方法、实际踩坑。
+
+## 前置：获取代码
+
+```bash
+git clone https://github.com/CN-big-cabbage/llm-in-practise.git
+cd llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom
+```
+
+各阶段 YAML 文件均在对应子目录（`01-Base/`、`02-Preloader/` … `09-Canary-Deployment/`、`Open-WebUI/`）下。
+
+## 适配自己的环境
+
+本指南以"示例集群"写成，你需要将以下值替换为自己的环境：
+
+| 占位符 | 含义 | 替换方法 |
+|---|---|---|
+| `<MASTER_PUBLIC_IP>` | master 节点公网 IP | `kubectl get node -o wide` 中的 `EXTERNAL-IP`，或 SSH 跳板 IP |
+| `<NODE01_PUBLIC_IP>` | node01 节点公网 IP | 同上 |
+| `<MASTER_INTERNAL_IP>` | master 节点内网 IP | `ip a` 或 `kubectl get node -o wide` 的 `INTERNAL-IP` |
+| `<NODE01_INTERNAL_IP>` | node01 节点内网 IP | 同上 |
+| `<LB_INGRESS_IP>` | Ingress LoadBalancer IP | `kubectl get svc -n ingress-nginx` |
+| `<LB_MINIO_IP>` | MinIO LoadBalancer IP | `kubectl get svc -n minio` |
+
+---
 
 ## 全局信息（用到时查）
 
-### 节点信息
+> 以下为本次实操的**示例值**，仅供参考。复现时请按上表替换为自己的环境值。
 
-| 节点     | SSH                         | 内网 IP           | 配置                     |
+### 节点信息（示例）
+
+| 节点     | SSH 方式                      | 内网 IP           | 配置                     |
 | ------ | --------------------------- | --------------- | ---------------------- |
-| master | `ssh ubuntu@117.50.186.132` | `10.60.37.205`  | 16C 64G + RTX 3090 24G |
-| worker | `ssh ubuntu@117.50.205.129` | `10.60.236.197` | 16C 64G + RTX 3090 24G |
+| master | `ssh ubuntu@<MASTER_PUBLIC_IP>` | `10.60.37.205`  | 16C 64G + RTX 3090 24G |
+| worker | `ssh ubuntu@<NODE01_PUBLIC_IP>` | `10.60.236.197` | 16C 64G + RTX 3090 24G |
 
 > 密码请用本地 ssh-config 或环境变量保存，不要 commit 到文件
 
@@ -19,22 +45,22 @@
 | 组件            | 版本                                       |
 | ------------- | ---------------------------------------- |
 | OS            | Ubuntu 22.04.4 LTS (kernel 5.15.0-113-generic) |
-| NVIDIA Driver | **580.142**                              |
-| CUDA          | **13.0**                                 |
+| NVIDIA Driver | 580.142                                  |
+| CUDA          | 13.0                                     |
 | Kubernetes    | v1.31.4                                  |
 | containerd    | v1.7.22                                  |
 | Calico        | v3.28.2（VXLAN MTU=1450）                  |
 | vLLM 镜像       | `vllm/vllm-openai:v0.11.2`（要 CUDA ≥ 12.9） |
 
-### 集群运行时信息
+### 集群运行时信息（示例）
 
 ```bash
 # 命名空间
 kubectl 操作主要在 namespace: llm-inference
 
-# LoadBalancer IP（MetalLB 分配段：10.60.37.200-220）
+# LoadBalancer IP（MetalLB 分配段：10.60.37.200-220 示例值）
 Ingress  : 10.60.37.210      curl 时加 -H "Host: vllm.magedu.com"
-MinIO    : 10.60.37.211      account: admin / admin123456
+MinIO    : 10.60.37.211      # 账号通过 minio-credentials Secret 配置
 MinIO UI : 10.60.37.212:9001
 
 # 模型路径（MinIO 上）
@@ -44,31 +70,30 @@ qwen/Qwen3-8B/          复制份（level-1 用）
 # 模型路径（节点本地，DaemonSet 预热后生成）
 /data/models/qwen3-8b/
 
-# 当前 containerd 已有镜像版本
-vllm/vllm-openai:v0.11.2                ✓ 两节点
-minio/mc:RELEASE.2024-10-08T09-37-26Z   ✓ 两节点
-minio/mc:RELEASE.2025-08-13T08-35-41Z   ✓ 两节点（备用）
+# containerd 镜像
+vllm/vllm-openai:v0.11.2                # 两节点都需要
+minio/mc:RELEASE.2024-10-08T09-37-26Z   # 两节点都需要
 ```
 
 ### 浏览器访问（可选）
 
-集群 LoadBalancer IP 都是云内网，在 master 上 socat 转发暴露到公网：
+集群 LoadBalancer IP 都是云内网，在 master 上用 socat 转发暴露到公网：
 
 ```bash
-ssh ubuntu@117.50.186.132
+ssh ubuntu@<MASTER_PUBLIC_IP>
 sudo apt install -y socat
 
-# 后台转发
-sudo nohup socat TCP-LISTEN:9001,fork,reuseaddr TCP:10.60.37.212:9001 > /tmp/socat-9001.log 2>&1 &  # MinIO Console
-sudo nohup socat TCP-LISTEN:9000,fork,reuseaddr TCP:10.60.37.211:9000 > /tmp/socat-9000.log 2>&1 &  # MinIO API
-sudo nohup socat TCP-LISTEN:80,fork,reuseaddr TCP:10.60.37.210:80 > /tmp/socat-80.log 2>&1 &        # Ingress
+# 后台转发（将 <LB_MINIO_IP> 等替换为你的 MetalLB IP）
+sudo nohup socat TCP-LISTEN:9001,fork,reuseaddr TCP:<LB_MINIO_UI_IP>:9001 > /tmp/socat-9001.log 2>&1 &  # MinIO Console
+sudo nohup socat TCP-LISTEN:9000,fork,reuseaddr TCP:<LB_MINIO_IP>:9000 > /tmp/socat-9000.log 2>&1 &    # MinIO API
+sudo nohup socat TCP-LISTEN:80,fork,reuseaddr TCP:<LB_INGRESS_IP>:80 > /tmp/socat-80.log 2>&1 &        # Ingress
 
 # 云控制台开 80 / 9000 / 9001 端口安全组
 ```
 
 浏览器访问：
-- MinIO Console: http://117.50.186.132:9001
-- Ingress（推理 API）: http://117.50.186.132/  + Host header `vllm.magedu.com`（用 Postman 或 ModHeader 插件）
+- MinIO Console: `http://<MASTER_PUBLIC_IP>:9001`
+- Ingress（推理 API）: `http://<MASTER_PUBLIC_IP>/` + Host header `vllm.magedu.com`（用 Postman 或 ModHeader 插件）
 
 ## 阶段总览
 
@@ -103,7 +128,7 @@ sudo nohup socat TCP-LISTEN:80,fork,reuseaddr TCP:10.60.37.210:80 > /tmp/socat-8
 ### 前置准备
 
 ```bash
-ssh ubuntu@117.50.186.132
+ssh ubuntu@<MASTER_PUBLIC_IP>
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/01-Base/vLLM
 
 # 1. 创建命名空间
@@ -248,7 +273,7 @@ kubectl delete pvc qwen3-8b-model-pvc-vllm -n llm-inference --ignore-not-found
 ### 操作步骤
 
 ```bash
-ssh ubuntu@117.50.186.132
+ssh ubuntu@<MASTER_PUBLIC_IP>
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/02-Preloader
 
 # 1. 清掉阶段 1 的 vLLM（保留 PVC 也可以，本阶段不用）
@@ -278,10 +303,10 @@ kubectl apply -f vllm-ingress.yaml
 
 ```bash
 # 1) 节点本地真的有模型
-ssh ubuntu@117.50.205.129 'sudo ls -lh /data/models/qwen3-8b/ | head -15'
+ssh ubuntu@<NODE01_PUBLIC_IP> 'sudo ls -lh /data/models/qwen3-8b/ | head -15'
 # 应看到 5 个 safetensors + tokenizer
 
-ssh ubuntu@117.50.186.132 'sudo ls -lh /data/models/qwen3-8b/ | head -51'
+ssh ubuntu@<MASTER_PUBLIC_IP> 'sudo ls -lh /data/models/qwen3-8b/ | head -51'
 # 同上
 
 # 2) vLLM Pod 启动时间 < 30 秒（对比阶段 1 几分钟）
@@ -648,7 +673,7 @@ kubectl run -n monitoring prom-test --rm -it --image=busybox --restart=Never -- 
 # 3) Grafana 浏览器访问（可选）
 # master 上 socat 转发：
 sudo nohup socat TCP-LISTEN:3000,fork,reuseaddr TCP:10.60.37.213:80 > /tmp/socat-3000.log 2>&1 &
-# 浏览器：http://117.50.186.132:3000（安全组放行 3000 端口）
+# 浏览器：http://<MASTER_PUBLIC_IP>:3000（安全组放行 3000 端口）
 # 密码：kubectl get secret -n monitoring kube-prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 -d; echo
 
 # 4) 压测触发扩容
@@ -762,9 +787,11 @@ cat Time-Slicing/nvidia-time-slicing-config.yaml
 kubectl apply -f Time-Slicing/nvidia-time-slicing-config.yaml
 
 # 3. 让 GPU Operator 使用新配置
+# 注意：name 和 default 必须和 nvidia-time-slicing-config.yaml 里一致
+# ConfigMap 名 = time-slicing-rtx3090，config key = rtx-3090
 kubectl patch clusterpolicy/cluster-policy \
   -n gpu-operator --type merge \
-  -p '{"spec": {"devicePlugin": {"config": {"name": "time-slicing-config", "default": "any"}}}}'
+  -p '{"spec": {"devicePlugin": {"config": {"name": "time-slicing-rtx3090", "default": "rtx-3090"}}}}'
 
 # 4. 重启 device-plugin DaemonSet
 kubectl rollout restart daemonset/nvidia-device-plugin-daemonset -n gpu-operator
@@ -781,22 +808,61 @@ kubectl apply -f .
 ### 验证方法
 
 ```bash
-# 1) 单节点能跑多个 vLLM Pod（之前 1 张卡只能 1 Pod）
+# 1) GPU 配额翻倍（最关键）
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": gpu="}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}'
+# 期望：k8s-master01: gpu=2   k8s-node01: gpu=2
+
+# 2) 验证 ClusterPolicy patch 已生效
+kubectl get clusterpolicy cluster-policy -n gpu-operator -o jsonpath='{.spec.devicePlugin.config}' | python3 -m json.tool
+# 期望：{"default":"rtx-3090","name":"time-slicing-rtx3090"}
+
+# 3) 暂停 KEDA 后手动扩到 2 副本验证调度
+kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused=true --overwrite
+kubectl scale statefulset vllm-qwen3-8b -n llm-inference --replicas=3
 kubectl get pods -n llm-inference -o wide
-# 期望：master 和 node01 上都有 >1 个 vllm pod
+# 期望：master或者node节点有一个机器上有2个vllm-qwen3-8开头的bpo 均 1/1 Running
+# 注：soft anti-affinity 优先分散，如果为两 Pod 通常落在不同节点各占 1 个虚拟 GPU
 
-# 2) 跑压测触发扩容，看能扩到 4
-kubectl get hpa -n llm-inference -w
+# 4) API 验证
+curl -s http://10.60.37.210/v1/chat/completions \
+  -H "Host: vllm.magedu.com" -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"你好"}],"max_tokens":20,"chat_template_kwargs":{"enable_thinking":false}}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
 
-# 3) GPU 真的在共享（多 Pod 用同一卡）
-ssh ubuntu@10.60.37.205 'nvidia-smi'
-# Processes 列看到多个 PID 占同一 GPU
 ```
+
+### ✅ 阶段 6 完成清单
+
+- [x] 两节点 `nvidia.com/gpu=2`（Time-Slicing replicas=2 生效）
+- [x] ClusterPolicy patch 指向 `time-slicing-rtx3090 / rtx-3090`
+- [x] `vllm-qwen3-8b-0`（k8s-master01）`1/1 Running`
+- [x] `vllm-qwen3-8b-1`（k8s-node01）`1/1 Running`
+- [x] API 调用正常返回中文回复
+- [x] KEDA 暂停验证后已恢复
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理（已在文档里固化） |
+|---|---|---|
+| Pod `FailedMount: configmap "time-slicing-config" not found` | patch 命令里 `name` 写的是 `time-slicing-config`，与 YAML 实际 ConfigMap 名 `time-slicing-rtx3090` 不一致 | patch 改为 `name: time-slicing-rtx3090, default: rtx-3090`（见步骤 3） |
+| 手动 `kubectl scale --replicas=2` 后 pod-1 瞬间被删 | KEDA HPA 检测到 Prometheus 指标获取失败，兜底缩回 minReplicas=1 | 验证前先暂停 KEDA：`kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused=true --overwrite` |
 
 ### 常见坑
 - 切多了 OOM：3090 24G 切 3 份就紧张了，每份 ≈ 8G，跑不动 Qwen3-8B（需要 16G）；推荐 **N=2**
 - ConfigMap apply 后 GPU 数没变：检查 `kubectl get clusterpolicy -o yaml | grep -A 5 devicePlugin`，确认 patch 生效
 - 多 Pod 共卡，但请求慢：Time-Slicing 是分时不是真并行，多 Pod 会互相抢，QPS 不会真线性上升
+
+### 进入下一阶段前
+
+```bash
+# 恢复 KEDA 自动扩缩（验证时暂停了，进阶段 7 前必须恢复）
+kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused- --overwrite
+
+# 清掉本阶段 vLLM（阶段 7 会重新部署）
+kubectl delete statefulset vllm-qwen3-8b -n llm-inference --ignore-not-found
+kubectl delete -f ../06-GPU-Timeslicing/vllm-ingress-backpressure.yaml --ignore-not-found
+# DaemonSet preloader 保留，阶段 7 继续复用
+```
 
 ---
 
@@ -824,44 +890,131 @@ sudo ctr -n k8s.io images tag docker.m.daocloud.io/lmcache/vllm-openai:v0.3.15 d
 ```bash
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/07-L1-Cache
 
-# 路径 A：vLLM 内置 APC（更简单）
-kubectl delete -f ../06-GPU-Timeslicing/vllm-statefulset.yaml --ignore-not-found
+# 路径 A：vLLM 内置 APC（更简单，推荐先做）
+kubectl delete statefulset vllm-qwen3-8b -n llm-inference --ignore-not-found
 kubectl apply -f vllm-statefulset-apc.yaml
 kubectl apply -f vllm-services.yaml
 kubectl apply -f vllm-ingress-backpressure.yaml
+kubectl wait --for=condition=Ready pod -l app=vllm-qwen3-8b -n llm-inference --timeout=5m
 
-# 路径 B：LMCache 外部缓存（更强大）
+# 路径 B：LMCache 外部缓存（更强大，需先拉镜像）
+# 1. 两节点都拉镜像（约 10GB，耗时较长）
+sudo ctr -n k8s.io images pull docker.m.daocloud.io/lmcache/vllm-openai:v0.3.15
+sudo ctr -n k8s.io images tag docker.m.daocloud.io/lmcache/vllm-openai:v0.3.15 lmcache/vllm-openai:v0.3.15
+# node01 同样操作
+ssh ubuntu@10.60.236.197 "sudo ctr -n k8s.io images pull docker.m.daocloud.io/lmcache/vllm-openai:v0.3.15 && sudo ctr -n k8s.io images tag docker.m.daocloud.io/lmcache/vllm-openai:v0.3.15 lmcache/vllm-openai:v0.3.15"
+
+# 2. 部署 lmcache-server + vLLM
+kubectl delete statefulset vllm-qwen3-8b -n llm-inference --ignore-not-found
+kubectl apply -f LMCache/lmcache-deployment.yaml
 kubectl apply -f LMCache/vllm-statefulset-lmcache.yaml
-cat LMCache/test_lmcache.sh   # 看测试脚本
-bash LMCache/test_lmcache.sh
+kubectl apply -f LMCache/vllm-services.yaml
+kubectl apply -f vllm-ingress-backpressure.yaml
 ```
 
-### 验证方法
+### 验证方法（路径 A：APC）
+
+> ⚠️ 长 prompt 不能直接用 bash 变量注入 curl JSON（会有控制字符报错），用 Python 发请求：
 
 ```bash
-# 1) 同一 prompt 重复请求，第二次 TTFT 大幅下降
-LONG_PROMPT="请详细解释 Kubernetes 的核心架构，包括 control plane、kubelet、kube-proxy、etcd、scheduler、controller-manager 等组件的职责。"
+# 在 master 节点上执行
+python3 << 'EOF'
+import urllib.request, json, time
 
-# 第一次（冷启动，cache miss）
-time curl -s http://10.60.37.210/v1/chat/completions \
-  -H "Host: vllm.magedu.com" -H "Content-Type: application/json" \
-  -d "{\"model\":\"qwen3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"$LONG_PROMPT\"}],\"max_tokens\":1,\"chat_template_kwargs\":{\"enable_thinking\":false}}" > /dev/null
+PROMPT = "你是一位资深 Kubernetes 专家。以下是一段详细的技术背景：Kubernetes 是一个开源的容器编排系统，最初由 Google 设计并捐赠给 Cloud Native Computing Foundation。它用于自动化容器化应用程序的部署、扩展和管理。Kubernetes 的核心架构分为控制平面和数据平面两部分。控制平面包含 etcd 用于存储集群状态、kube-apiserver 作为统一入口、kube-scheduler 负责 Pod 调度、kube-controller-manager 运行各种控制器。数据平面每个节点运行 kubelet 负责 Pod 生命周期管理、kube-proxy 负责网络规则、以及容器运行时如 containerd。网络层面 Kubernetes 使用 CNI 插件如 Calico、Flannel、Cilium 实现 Pod 间通信，Service 通过 iptables 或 IPVS 实现负载均衡，Ingress 提供 HTTP 路由能力。存储层面支持 PV/PVC 抽象、StorageClass 动态供应、CSI 插件体系。安全层面有 RBAC、NetworkPolicy、PodSecurity、Secret 加密等机制。请基于以上背景回答：etcd 在集群中的作用是什么？"
 
-# 第二次（cache hit）
-time curl -s http://10.60.37.210/v1/chat/completions \
-  -H "Host: vllm.magedu.com" -H "Content-Type: application/json" \
-  -d "{\"model\":\"qwen3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"$LONG_PROMPT\"}],\"max_tokens\":1,\"chat_template_kwargs\":{\"enable_thinking\":false}}" > /dev/null
+payload = json.dumps({
+    "model": "qwen3-8b",
+    "messages": [{"role": "user", "content": PROMPT}],
+    "max_tokens": 1,
+    "chat_template_kwargs": {"enable_thinking": False}
+}).encode()
 
-# 期望第二次比第一次快 50%-80%
+headers = {"Content-Type": "application/json", "Host": "vllm.magedu.com"}
 
-# 2) Prometheus 指标看命中率
-# vllm:num_preemptions_total / vllm:gpu_cache_usage_perc
+for i in range(3):
+    label = "Cache Miss" if i == 0 else "Cache Hit"
+    req = urllib.request.Request("http://10.60.37.210/v1/chat/completions", data=payload, headers=headers)
+    t0 = time.time()
+    with urllib.request.urlopen(req) as r:
+        body = json.loads(r.read())
+    elapsed = time.time() - t0
+    print(f"第{i+1}次（{label}）TTFT: {elapsed*1000:.0f}ms  prompt_tokens: {body['usage']['prompt_tokens']}")
+EOF
 ```
 
+### 实测结果（2026-06-18，路径 A APC，RTX 3090，Qwen3-8B）
+
+```
+第1次（Cache Miss）TTFT: 134ms  prompt_tokens: 256
+第2次（Cache Hit） TTFT:  31ms  prompt_tokens: 256
+第3次（Cache Hit） TTFT:  30ms  prompt_tokens: 256
+```
+
+**APC 命中后 TTFT 从 134ms → 31ms，加速 4.3x** ✅
+
+### 验证方法（路径 B：LMCache）
+
+```bash
+# lmcache-server 正常运行
+kubectl get pods -n lmcache
+# 期望：lmcache-server-0  1/1  Running
+
+# 用 Python 测试 TTFT（长 prompt 不能用 bash 变量注入 curl）
+python3 << 'EOF'
+import urllib.request, json, time
+
+SHARED_PREFIX = "Qwen3 is the latest generation of large language models in Qwen series ... "  # 同 APC 测试的长 prompt
+
+tests = [
+    ("冷启动   Cache Miss",  SHARED_PREFIX + "Please summarize the key features of Qwen3."),
+    ("相同前缀 Cache Hit",   SHARED_PREFIX + "What are the main architectural improvements in Qwen3?"),
+    ("再次命中 Cache Hit",   SHARED_PREFIX + "What are the main architectural improvements in Qwen3?"),
+    ("不同前缀 Cache Miss",  "Tell me a joke about Kubernetes."),
+]
+
+headers = {"Content-Type": "application/json", "Host": "vllm.magedu.com"}
+for label, prompt in tests:
+    payload = json.dumps({"model": "qwen3-8b", "prompt": prompt, "max_tokens": 1, "temperature": 0}).encode()
+    req = urllib.request.Request("http://10.60.37.210/v1/completions", data=payload, headers=headers)
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = json.loads(r.read())
+    elapsed = (time.time() - t0) * 1000
+    print(f"{label}  TTFT={elapsed:.0f}ms  tokens={body['usage']['prompt_tokens']}")
+EOF
+```
+
+### 实测结果（2026-06-18，路径 B LMCache，RTX 3090，Qwen3-8B）
+
+```
+冷启动   Cache Miss  TTFT=129ms  prompt_tokens=199
+相同前缀 Cache Hit   TTFT= 36ms  prompt_tokens=200
+再次命中 Cache Hit   TTFT= 30ms  prompt_tokens=200
+不同前缀 Cache Miss  TTFT= 29ms  prompt_tokens=7
+```
+
+**命中加速 3.6-4.3x**（129ms→30ms）。单 Pod 下与 APC 效果相当；多 Pod 时 LMCache 还能跨 Pod 共享 KV cache，APC 无此能力。
+
+### ✅ 阶段 7 完成清单
+
+- [x] 路径 A APC：`--enable-prefix-caching` 生效，256 token prompt 命中加速 4.3x（134ms→31ms）
+- [x] 路径 B LMCache：lmcache-server `1/1 Running`，199 token prompt 命中加速 3.6x（129ms→36ms）
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理（已在文档里固化） |
+|---|---|---|
+| curl 发长 prompt 报 `JSON decode error: Invalid control character` | bash 变量含换行符注入 JSON 时未转义 | 改用 Python `json.dumps()` 发请求 |
+| `vllm-statefulset-lmcache.yaml` kubectl apply 报 YAML 错误 | 文件有重复 `spec:` 字段 | 已删除多余 `spec:` |
+| LMCache vLLM 启动报模型找不到 | 模型路径写成 `/data/models/qwen3-8b-awq` | 改为 `/data/models/qwen3-8b`，量化改 `bfloat16` |
+| lmcache-server Pending | 原配置请求 `nvidia.com/gpu: 1`，与 vLLM 争抢 GPU | lmcache-server 去掉 GPU 请求，纯 CPU 运行 |
+| vLLM 报 `No available memory for cache blocks` | `--gpu-memory-utilization 0.45` 沿用 Time-Slicing 的保守值，模型本身已占 63% 显存 | 改为 `0.85`（单 Pod 场景） |
+
 ### 常见坑
-- LMCache 镜像启动失败：镜像基础是 vLLM 但版本可能跟 v0.11.2 不同，注意启动参数兼容性
-- APC 没生效：确认 vLLM args 有 `--enable-prefix-caching`
+- APC 没生效：确认 vLLM args 有 `--enable-prefix-caching`，短 prompt（< 100 token）效果不明显
 - 重复请求 TTFT 没变：可能 KV cache 太小被驱逐，调 `--num-gpu-blocks-override`
+- LMCache 跨 Pod 不共享：检查 `LMCACHE_REMOTE_URL` 是否指向正确的 lmcache-server Service 地址
 
 ---
 
@@ -901,53 +1054,110 @@ kubectl get pods -n llm-inference -l app=vllm-router
 ### 验证方法
 
 ```bash
-# 1) 同前缀请求路由到同一 Pod
-LONG_CTX="你是一个 Kubernetes 专家。请回答："
+# Router 发现后端（看日志）
+kubectl logs -n llm-inference -l app=vllm-router --tail=20
+# 期望：Discovered new serving engine vllm-qwen3-8b-0 / vllm-qwen3-8b-1
 
-for q in "什么是 Pod" "什么是 Service" "什么是 Pod"; do
-  curl -s http://10.60.37.210/v1/chat/completions \
-    -H "Host: vllm.magedu.com" -H "Content-Type: application/json" \
-    -d "{\"model\":\"qwen3-8b\",\"messages\":[{\"role\":\"user\",\"content\":\"$LONG_CTX $q\"}],\"max_tokens\":1}" > /dev/null
-done
+# 用 Python 测 prefixaware 路由（长 prompt 不能用 bash curl 注入）
+python3 << 'EOF'
+import urllib.request, json, time
 
-# 看 Pod 日志，相同 q 的请求应该落在同一 Pod
-kubectl logs vllm-qwen3-8b-0 -n llm-inference | tail -20
-kubectl logs vllm-qwen3-8b-1 -n llm-inference | tail -20
+PREFIX = "Qwen3 is the latest generation of large language models ... "  # 200+ token 长前缀
+
+tests = [
+    ("前缀A-请求1", PREFIX + "Summarize Qwen3 key features."),
+    ("前缀A-请求2", PREFIX + "What are the main improvements in Qwen3?"),
+    ("前缀B-请求1", "Tell me about Kubernetes architecture."),
+    ("前缀A-请求3", PREFIX + "What languages does Qwen3 support?"),
+]
+headers = {"Content-Type": "application/json", "Host": "vllm.magedu.com"}
+for label, prompt in tests:
+    payload = json.dumps({"model": "qwen3-8b", "prompt": prompt, "max_tokens": 1, "temperature": 0}).encode()
+    req = urllib.request.Request("http://10.60.37.210/v1/completions", data=payload, headers=headers)
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=30) as r: json.loads(r.read())
+    print(f"{label:15s}  TTFT={(time.time()-t0)*1000:.0f}ms")
+EOF
+
+# 再看 Router 日志，前缀A的所有请求应路由到同一个 Pod IP
+kubectl logs -n llm-inference -l app=vllm-router --tail=20 | grep 'Routing request'
 ```
 
-### 常见坑
-- Router 启动失败：看日志是否有 KV indexer 相关错误，可能要先确保所有 vLLM 实例都开启了 APC
-- 配置太复杂：`llm-d-config.yaml` 里有 inferencePool / inferenceModel CRD，需要先理解 llm-d 概念
-- Ingress 改指错：原 ingress 指 vllm-service:8000，本阶段应指 vllm-router-service
+### 实测结果（2026-06-18，vLLM-Router prefixaware，2 Pod 跨节点）
+
+```
+前缀A-请求1   TTFT= 170ms   (冷启动 Cache Miss)
+前缀A-请求2   TTFT=  33ms   (相同前缀 Cache Hit，路由到同一 Pod)
+前缀A-请求3   TTFT=  33ms   (Cache Hit)
+前缀B-请求1   TTFT=  33ms   (短 prompt，另一 Pod 处理)
+前缀A-请求4   TTFT=  34ms   (Cache Hit，回到原 Pod)
+```
+
+Router 日志：前缀 A 全部路由 → `192.168.32.130`（pod-1），前缀 B → `192.168.85.193`（pod-0）。
+
+### ✅ 阶段 8 完成清单
+
+- [x] vLLM-Router 部署：`1/1 Running`，发现 2 个后端 Pod
+- [x] prefixaware 路由验证：相同前缀固定路由同一 Pod，命中 APC 加速 5x（170ms→33ms）
+- [x] Ingress 切换：`vllm.magedu.com` 流量经过 Router 分发
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| Ingress apply 报 `already defined` | 原 `vllm-ingress` 占用 `vllm.magedu.com /` | 先 `kubectl delete ingress vllm-ingress -n llm-inference` 再 apply |
+| pod-0 Pending（DiskPressure） | node01 containerd 镜像文件系统达 85% 触发 eviction | `crictl rm`（停止容器）+ `crictl rmp`（NotReady sandbox）+ `crictl rmi --prune` 释放约 1GB，DiskPressure 随即解除 |
+| Router 镜像拉取慢 | `lmcache/lmstack-router:latest` 从 Docker Hub 直拉（国内慢） | 同步在 node 上用 DaoCloud 预拉：`sudo crictl pull docker.m.daocloud.io/lmcache/lmstack-router:latest` |
+| `/is_sleeping` WARNING | vLLM v0.11.2 没有此接口，Router 报 404 | 无害，忽略即可 |
 
 ---
 
 ## 阶段 9：金丝雀发布（`09-Canary-Deployment/`）
 
-**实践目的**：用 Argo Rollouts 做 vLLM 版本/模型的灰度发布。10% 流量 → 监控指标 → 自动 promote 或 abort。
+**实践目的**：用 Argo Rollouts 做 vLLM 版本/模型的灰度发布。25% 流量 → Prometheus AnalysisRun → 50% → 再次 Analysis → 100% 全量切换。
 
 **新增组件**：
-- **Argo Rollouts CRD + Controller**
+- **Argo Rollouts CRD + Controller**（v1.9.0）
 - **Rollout** 资源（替代 Deployment/StatefulSet）
 - **AnalysisTemplate**（基于 Prometheus 自动评估金丝雀健康度）
-- stable + canary 两套 Service
+- stable + canary 两套 Service + Ingress canary-weight 注解
+- KEDA ScaledObject 指向 Rollout（而非 StatefulSet）
 
-⚠️ **YAML 里 replicas=3**，你只有 2 GPU，**必须先做阶段 6 Time-Slicing**，或者把 replicas 改成 2。
+⚠️ **必须先完成阶段 6 Time-Slicing**（每节点 2 虚拟 GPU）再做本阶段，否则 3 副本 GPU 不够调度。
 
-### 前置依赖
+### 关键配置说明
+
+本阶段使用 **bitsandbytes int8 量化**（而非原课程 AWQ int4），原因：
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `--quantization bitsandbytes` | int8 | 运行时量化，无需提前准备量化模型 |
+| `--gpu-memory-utilization` | `0.45` | 每 Pod ≈ 10.8GB，2 Pod 共享 24GB 物理卡可行 |
+| `maxSurge` | `1`（整数）| 不能写 `"25%"`，3×0.25=0.75 向下取整=0 → canary 永远 0 Pod |
+
+### 前置依赖：安装 Argo Rollouts
 
 ```bash
-# 装 Argo Rollouts
+# GitHub 连不上时用代理
 kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
 
-# 装 kubectl 插件（可选，方便观察）
-curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
-chmod +x kubectl-argo-rollouts-linux-amd64
-sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+# 方法 A：直连（国内可能超时）
+kubectl apply -n argo-rollouts \
+  -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+# 方法 B：gh-proxy 代理（推荐）
+kubectl apply -n argo-rollouts \
+  -f https://gh-proxy.com/github.com/argoproj/argo-rollouts/releases/download/v1.9.0/install.yaml
 
 # 验证
+kubectl get pods -n argo-rollouts
 kubectl get crd rollouts.argoproj.io
+
+# 装 kubectl 插件
+curl -LO https://gh-proxy.com/github.com/argoproj/argo-rollouts/releases/download/v1.9.0/kubectl-argo-rollouts-linux-amd64
+chmod +x kubectl-argo-rollouts-linux-amd64
+sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+kubectl argo rollouts version
 ```
 
 ### 操作步骤
@@ -955,44 +1165,150 @@ kubectl get crd rollouts.argoproj.io
 ```bash
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/09-Canary-Deployment
 
-# 如果你没做阶段 6 Time-Slicing，先改 replicas
-sed -i 's|replicas: 3|replicas: 2|' vllm-rollout.yaml
-
-# 清掉之前的 statefulset
+# 1. 清掉之前阶段的 statefulset（保留 DaemonSet preloader）
 kubectl delete statefulset vllm-qwen3-8b -n llm-inference --ignore-not-found
+# 阶段 8 的 vllm-ingress 也要先删（防止 host 冲突）
+kubectl delete ingress vllm-ingress -n llm-inference --ignore-not-found
 
-# 部署本阶段
-kubectl apply -f .
+# 2. 暂停 KEDA（防止 KEDA 干扰手动扩缩）
+kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference \
+  autoscaling.keda.sh/paused=true --overwrite
 
-# 观察 Rollout（推荐用插件）
-kubectl argo rollouts get rollout vllm-rollout -n llm-inference -w
+# 3. 部署本阶段所有资源
+kubectl apply -f vllm-canary-services.yaml   # stable / canary / vllm-service
+kubectl apply -f vllm-canary-ingress.yaml    # vllm-stable ingress + canary ingress
+kubectl apply -f analysis-template.yaml      # Prometheus AnalysisTemplate
+kubectl apply -f keda-rollout.yaml           # KEDA ScaledObject（指向 Rollout）
+kubectl apply -f vllm-rollout.yaml           # Rollout（替代 StatefulSet）
 
-# 触发金丝雀升级（改镜像或配置）
-kubectl argo rollouts set image vllm-rollout vllm=vllm/vllm-openai:v0.11.2 -n llm-inference
-# 流量按 step 设置 10% → 25% → 50% → 100%
+# 4. 等 stable Pod 全部启动（bitsandbytes 每 Pod 约 2 分钟）
+# 注意：3 个 Pod 同时启动可能 OOM（bitsandbytes 加载时有内存峰值）
+# 安全做法：先让 1 个 Pod 跑起来，再逐步扩
+kubectl argo rollouts get rollout vllm-qwen3-8b -n llm-inference
 
-# 跑验证脚本
-bash verify-canary.sh
+# 如果 Pod 同时 OOM，手动逐步扩副本（KEDA 已暂停）
+# 先等 1 个 Pod Ready，再加到 2，再到 3
+kubectl patch rollout vllm-qwen3-8b -n llm-inference \
+  --type=merge -p '{"spec":{"replicas":1}}'
+# 等 Ready 后...
+kubectl patch rollout vllm-qwen3-8b -n llm-inference \
+  --type=merge -p '{"spec":{"replicas":2}}'
+# 再等 Ready 后...
+kubectl patch rollout vllm-qwen3-8b -n llm-inference \
+  --type=merge -p '{"spec":{"replicas":3}}'
+```
+
+### 触发 Canary 发布
+
+```bash
+# 触发方式：修改 Pod template annotation（不改镜像也能触发新 revision）
+kubectl patch rollout vllm-qwen3-8b -n llm-inference \
+  --type=merge \
+  -p '{"spec":{"template":{"metadata":{"annotations":{"rollout.argoproj.io/restart-at":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}}}}'
+
+# 观察发布进度
+kubectl argo rollouts get rollout vllm-qwen3-8b -n llm-inference
+
+# 期望看到：
+# ├──# revision:N  (canary)
+# │  └── Pod  Running  ready:1/1
+# ├──# revision:1  (stable)
+# │  └── 3 Pods  Running
+# Step: 1/7  SetWeight: 25  ActualWeight: 25
+```
+
+### Canary 推进流程
+
+```bash
+# Step 1/7：setWeight 25（25% 流量到 canary）→ pause 3m
+# Step 2/7：AnalysisRun（Prometheus 检查 TTFT / 等待队列 / GPU Cache）
+# Step 3/7：setWeight 50（50% 流量）→ pause 5m
+# Step 4/7：AnalysisRun 二次检查
+# Step 5/7：setWeight 100 → 全量切换
+
+# 跳过 pause（不等计时器，立即推进）
+kubectl argo rollouts promote vllm-qwen3-8b -n llm-inference
+
+# 跳过所有剩余步骤（直接全量 promote，适合实验验证）
+kubectl argo rollouts promote vllm-qwen3-8b -n llm-inference --full
+
+# 查看 AnalysisRun 详情
+kubectl get analysisrun -n llm-inference
+kubectl describe analysisrun <name> -n llm-inference
+
+# Rollout abort 后恢复（AnalysisRun 失败时 Rollout 变 Degraded）
+kubectl argo rollouts retry rollout vllm-qwen3-8b -n llm-inference
 ```
 
 ### 验证方法
 
 ```bash
-# 1) 流量按比例分配
-# 持续打请求，看 stable / canary Pod 收到的比例
+# 1) 查看 Rollout 完整状态
+kubectl argo rollouts get rollout vllm-qwen3-8b -n llm-inference
 
-# 2) 故意触发失败，AnalysisRun 自动 abort
-# 部署一个会启动失败的镜像版本：
-kubectl argo rollouts set image vllm-rollout vllm=vllm/vllm-openai:v0.0.0-fake -n llm-inference
-# 看 Rollout 自动 abort 并回滚
+# 2) 查看 canary-weight（Ingress 注解）
+kubectl get ingress vllm-qwen3-8b-vllm-stable-canary -n llm-inference \
+  -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/canary-weight}'; echo
+# 期望：25（Step 1）→ 50（Step 3）→ 0（完成后权重归 0，全走 stable service）
 
-# 3) 历史版本管理
-kubectl argo rollouts history rollout vllm-rollout -n llm-inference
+# 3) 跑验证脚本
+bash verify-canary.sh
+
+# 4) 发布完成后确认
+kubectl argo rollouts get rollout vllm-qwen3-8b -n llm-inference
+# 期望：Status: ✔ Healthy，revision:N 为 stable，revision:1 ScaledDown
+
+# 5) API 验证
+curl -s http://10.60.37.210/v1/chat/completions \
+  -H "Host: vllm.magedu.com" -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"你好"}],"max_tokens":20,"chat_template_kwargs":{"enable_thinking":false}}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
 ```
 
+### 实测结果（2026-06-18，Argo Rollouts v1.9.0，bitsandbytes int8）
+
+```
+发布策略：25% → AnalysisRun → 50% → AnalysisRun → 100%
+stable: 2 Pod Running（master01 + node01）
+canary: 1 Pod Running（全量后升为 2 Pod stable）
+
+最终状态：
+  Status: ✔ Healthy
+  Step: 7/7  SetWeight: 100  ActualWeight: 100
+  revision:5 → stable（2 Pod Running）
+  revision:1 → ScaledDown（0 Pod）
+  canary-weight → 0（Ingress 权重恢复正常）
+```
+
+### ✅ 阶段 9 完成清单
+
+- [x] Argo Rollouts v1.9.0 安装：Controller + CRD + kubectl 插件
+- [x] Rollout 初始部署：3 Pod stable Running（bitsandbytes int8，0.45 utilization）
+- [x] Canary 触发：canary Pod 调度成功，canary-weight 从 0 → 25
+- [x] AnalysisRun Prometheus 连通：TTFT / 等待队列 / GPU Cache 三项指标
+- [x] setWeight 50% 验证：50% 流量切换正常
+- [x] 全量 promote：revision:1 缩到 0，revision:5 接管全部流量
+- [x] Rollout Status: ✔ Healthy
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理（已在文档/配置里固化） |
+|---|---|---|
+| Canary Pod 一直 0 个（ScaledDown） | `maxSurge: "25%"` → 3×0.25=0.75 向下取整=0 | 改为 `maxSurge: 1`（整数） |
+| `TrafficRoutingError: canary ingress controlled by different object` | Canary Ingress 上有旧 Rollout 留下的 `argo-rollouts.argoproj.io/managed-by` 注解 | 删除 canary ingress 重建：`kubectl delete ingress vllm-qwen3-8b-vllm-stable-canary -n llm-inference` |
+| AnalysisRun Error: `no such host prometheus-server` | analysis-template.yaml 里 Prometheus 地址写错 | 改为 `kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090` |
+| AnalysisRun Error: `invalid operation: < (mismatched types []float64 and int)` | Prometheus 返回向量，`result < 2000` 直接比较整数失败 | 查询加 `scalar()` 强制返回标量；条件改为 `isNaN(result) \|\| result < 2000.0`（无流量时 NaN 视为通过） |
+| 3 个 bitsandbytes Pod 同时启动 OOM | bitsandbytes 加载时有内存峰值（先 bfloat16 再量化），同节点 2 Pod 同时加载峰值 >24GB | 手动逐步扩：1→2→3，每步等 Ready 再加 |
+| KEDA 干扰 → Pod 被强制缩到 1 | ScaledObject 仍在工作，把 replicas 覆盖回 minReplicas | 暂停 KEDA：`kubectl annotate scaledobject vllm-qwen3-8b-scaler -n llm-inference autoscaling.keda.sh/paused=true --overwrite` |
+| 全量 promote 时第 2 个 canary Pod Pending（GPU 满） | `maxUnavailable: 0` 导致 stable 不缩、canary 不能调度，形成死锁 | 手动删一个 stable Pod 释放 GPU 槽：`kubectl delete pod <stable-pod> -n llm-inference` |
+| Ingress `host already defined` | 阶段 8 的 `vllm-ingress` 已占用 `vllm.magedu.com /` | 先 `kubectl delete ingress vllm-ingress -n llm-inference` 再 apply 本阶段 Ingress |
+
 ### 常见坑
-- AnalysisTemplate 引用的 metric 在 Prometheus 找不到：检查 PromQL 在 Prometheus UI 是否查得到
-- replicas=3 Pending：减到 2，或先做 Time-Slicing 让单节点能跑 2 Pod
+
+- **AnalysisRun 一直 Error**：先确认 Prometheus 地址，`kubectl run` 一个 busybox 临时 Pod 测 PromQL 查询
+- **canary Pod 不启动**：检查 `kubectl describe rollout ... | grep Events` 有没有 `TrafficRoutingError`
+- **setWeight 不生效（ActualWeight=0）**：Rollout Degraded 状态，先 `retry rollout` 恢复再 `promote`
+- **GPU 不够**：2 节点 × 2 虚拟 GPU = 4 槽，3 stable + 1 canary 共 4 Pod 是极限；`maxSurge=1` 不能再大
 
 ---
 
@@ -1000,10 +1316,22 @@ kubectl argo rollouts history rollout vllm-rollout -n llm-inference
 
 **实践目的**：装一个 ChatGPT 风格的前端，接到 vLLM 的 OpenAI API，浏览器聊天。
 
-### 前置依赖
+**关键配置说明**：
+- `OPENAI_API_BASE_URL` 指向 `vllm-stable.llm-inference.svc.cluster.local:8000/v1`（Rollout stable service）
+- 去掉了原 YAML 里的 `HTTP_PROXY`/`HTTPS_PROXY`（`172.29.0.1` 集群内不可达，保留会导致请求超时）
+- Deployment 在 `default` namespace，跨 namespace 通过全限定 DNS 访问 vLLM
+
+### 前置依赖：镜像预拉取（两节点都做）
 
 ```bash
-# 拉 Open-WebUI 镜像（国外 ghcr.io）
+# ⚠️ ghcr.io 国内不通，必须用 ghcr.m.daocloud.io，不能用 docker.m.daocloud.io（403）
+
+# master 节点
+sudo ctr -n k8s.io images pull ghcr.m.daocloud.io/open-webui/open-webui:main
+sudo ctr -n k8s.io images tag ghcr.m.daocloud.io/open-webui/open-webui:main ghcr.io/open-webui/open-webui:main
+
+# node01 节点（master→node01 内网 SSH 密钥未配置，直接 ssh 到 node01 执行）
+# ssh ubuntu@<NODE01_PUBLIC_IP>
 sudo ctr -n k8s.io images pull ghcr.m.daocloud.io/open-webui/open-webui:main
 sudo ctr -n k8s.io images tag ghcr.m.daocloud.io/open-webui/open-webui:main ghcr.io/open-webui/open-webui:main
 ```
@@ -1013,29 +1341,62 @@ sudo ctr -n k8s.io images tag ghcr.m.daocloud.io/open-webui/open-webui:main ghcr
 ```bash
 cd /opt/llm-in-practise/LLM_on_Kubernetes/Inference_Platfrom/Open-WebUI
 
-# 看 deployment 配置，特别是 OPENAI_API_BASE_URL 是否指向 vllm-service
-cat openwebui-deployment.yaml | grep -A 2 OPENAI
+kubectl apply -f openwebui-deployment.yaml   # Deployment + PVC(10Gi) + LoadBalancer Service
+kubectl apply -f openwebui-ingress.yaml      # Ingress: openwebui.magedu.com
 
-kubectl apply -f .
+# 等 Pod Ready（首次启动约 30 秒）
+kubectl wait --for=condition=Ready pod -l app=open-webui -n default --timeout=3m
+kubectl get svc open-webui-service -n default
+# EXTERNAL-IP: 10.60.37.214  PORT: 8080
+```
 
-# 等 Pod Ready
-kubectl wait --for=condition=Ready pod -l app=open-webui -n llm-inference --timeout=5m
+### 公网访问（socat 转发）
+
+```bash
+# 在 master 上执行
+sudo nohup socat TCP-LISTEN:8080,fork,reuseaddr TCP:10.60.37.214:8080 > /tmp/socat-8080.log 2>&1 &
+# 云控制台安全组放行 8080 端口
+# 浏览器访问：http://<MASTER_PUBLIC_IP>:8080
+# 首次打开注册账号（第一个注册自动成为 admin），选择 qwen3-8b 开始聊天
 ```
 
 ### 验证方法
 
 ```bash
-# Ingress host 是 openwebui.magedu.com
-# 选项 A：本地 hosts 文件加映射
-echo "117.50.186.132 openwebui.magedu.com" | sudo tee -a /etc/hosts
-# 浏览器：http://openwebui.magedu.com
+# 1) 内网直接测试
+curl -s -o /dev/null -w '%{http_code}' http://10.60.37.214:8080/
+# 期望：200
 
-# 选项 B：socat 转发，不用改 hosts
-ssh ubuntu@117.50.186.132 'sudo nohup socat TCP-LISTEN:8080,fork,reuseaddr TCP:10.60.37.210:80 &'
-# 浏览器：http://117.50.186.132:8080 + 在浏览器加 Host header（用 ModHeader 插件）
+# 2) 确认后端模型连通
+kubectl exec -n default $(kubectl get pod -n default -l app=open-webui -o name | head -1) -- \
+  curl -s http://vllm-stable.llm-inference.svc.cluster.local:8000/v1/models
+# 期望：{"data":[{"id":"qwen3-8b",...}]}
 
-# 首次注册账号，开始聊天，能调用 qwen3-8b
+# 3) 查已注册账号（忘记邮箱时用）
+kubectl exec -n default $(kubectl get pod -n default -l app=open-webui -o name | head -1) -- \
+  python3 -c "
+import sqlite3
+conn = sqlite3.connect('/app/backend/data/webui.db')
+for r in conn.execute('SELECT email, role FROM user'): print(r)
+"
 ```
+
+### ✅ 阶段 10 完成清单
+
+- [x] 两节点镜像预拉取：`ghcr.m.daocloud.io/open-webui/open-webui:main`（1.6 GiB）
+- [x] Deployment + PVC + LoadBalancer Service 部署成功（default namespace）
+- [x] Pod `1/1 Running`，LoadBalancer IP `10.60.37.214:8080`（HTTP 200）
+- [x] 浏览器聊天测试通过（qwen3-8b 模型正常响应）
+
+### 实测踩坑（已规避）
+
+| 现象 | 原因 | 处理（已在文档/配置里固化） |
+|---|---|---|
+| `docker.m.daocloud.io/open-webui/...` 403 | DaoCloud docker 镜像源不镜像 ghcr.io | 改用 `ghcr.m.daocloud.io/open-webui/open-webui:main` |
+| Pod Pending：`pvc is being deleted` | 旧 PVC 还在 Terminating 时重新 apply | 等 PVC 完全删除，或 `kubectl patch pvc open-webui-data -n default -p '{"metadata":{"finalizers":null}}'` 解卡 |
+| `Unexpected end of JSON input` | ① socat 进程退出，前端 fetch 拿到空 body；② 登录邮箱写错 | 重启 socat；用 DB 里查到的邮箱登录 |
+| 登录 400 | 账号邮箱不是 `admin@admin.com`，首次注册的邮箱才有效 | `sqlite3 webui.db 'SELECT email FROM user'` 查实际邮箱 |
+| master→node01 scp 失败 | 两节点间 SSH 密钥未配置 | 直接 ssh 到 node01 公网 IP 执行拉取命令 |
 
 ---
 
@@ -1060,11 +1421,11 @@ kubectl delete statefulset,deployment,rollout -n llm-inference -l app=vllm-qwen3
 | 3  MultiReplica | ✅    | 2026-06-15 | 2 副本分布两节点，负载均衡验证通过                       |
 | 4  BenchMark    | ✅    | 2026-06-15 | 单副本基线：TTFT 120ms / TPOT 24ms / 吞吐 494 tok/s |
 | 5  KEDA         | ✅    | 2026-06-15 | 扩缩容验证通过，吞吐翻倍（494→973 tok/s）  |
-| 6  Time-Slicing | ☐    |            |                                          |
-| 7  L1-Cache     | ☐    |            | 拉 LMCache 镜像                             |
-| 8  LLM-Router   | ☐    |            | 拉 llm-d 或 router 镜像                      |
-| 9  Canary       | ☐    |            | 装 Argo Rollouts                          |
-| 10 Open-WebUI   | ☐    |            |                                          |
+| 6  Time-Slicing | ✅    | 2026-06-18 | 每节点 gpu=2，双副本跨节点 Running，API 正常 |
+| 7  L1-Cache     | ✅    | 2026-06-18 | APC 4.3x / LMCache 3.6x 加速，两路径均验证通过 |
+| 8  LLM-Router   | ✅    | 2026-06-18 | vLLM-Router prefixaware 路由，APC 加速 5x（170→33ms） |
+| 9  Canary       | ✅    | 2026-06-18 | Argo Rollouts v1.9.0，bitsandbytes int8，25%→50%→100% promote 完成 |
+| 10 Open-WebUI   | ✅    | 2026-06-18 | 浏览器聊天测试通过，qwen3-8b 正常响应 |
 
 ---
 
@@ -1083,12 +1444,6 @@ kubectl delete statefulset,deployment,rollout -n llm-inference -l app=vllm-qwen3
 | KEDA 扩不上去                                | 物理 GPU 不够，做 Time-Slicing                 |
 | Prometheus 没指标                           | 看 ServiceMonitor + vLLM Pod annotations  |
 
----
+## 总结
 
-## 卡住了？
-
-1. 描述卡在哪个阶段哪一步
-2. 贴 `kubectl describe pod ...` 和 `kubectl logs ... --previous` 输出
-3. 一起排查
-
-完成所有阶段后，恭喜你掌握了 K8s 上 LLM 推理服务的**生产级部署技能**。
+ 整个实践路径从 vLLM 基础部署 → HostPath 预热 → 多副本 → 压测基线 → KEDA 弹性扩缩 → GPU 时间切片 → KV Cache 加速 → Cache-Aware 路由 → Canary 金丝雀发布 → Open-WebUI 前端，全部跑通。

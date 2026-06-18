@@ -47,11 +47,9 @@ spec:
             requests:
               memory: "16Gi"
               cpu: "4"
-              nvidia.com/gpu: "1"
             limits:
               memory: "16Gi"
               cpu: "4"
-              nvidia.com/gpu: "1"
 ---
 # 03-lmcache-service.yaml
 apiVersion: v1

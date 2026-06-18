@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VLLM_URL="http://192.168.70.54:8000/v1/completions"
+VLLM_URL="http://10.60.37.210/v1/completions"
 
 # 构造一个较长的共享前缀（约 800~1000 tokens）
 SHARED_PREFIX="Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts models developed by Alibaba Cloud. Qwen3 introduces several groundbreaking features including native reasoning capabilities, multi-language support across 29 languages, advanced agentic abilities with tool use and code execution, and a novel dual-mode thinking mechanism that allows seamless switching between fast intuitive responses and deep deliberate reasoning. The model family includes both dense models ranging from 0.6B to 32B parameters and mixture-of-experts variants with up to 235B total parameters and 32B active parameters. Qwen3 demonstrates state-of-the-art performance on benchmarks including MMLU, GPQA, and GSM8K, while maintaining high efficiency through architectural innovations such as grouped query attention, sliding window attention, and expert routing optimization. The training process involved pre-training on over 30 trillion tokens followed by supervised fine-tuning and reinforcement learning from human feedback. Qwen3 supports context lengths up to 128K tokens and offers advanced capabilities in mathematics, coding, logical reasoning, and creative writing. "
@@ -17,6 +17,7 @@ test_request() {
     
     response=$(curl -s -w "\n%{time_starttransfer}\n%{http_code}" \
         -H "Content-Type: application/json" \
+        -H "Host: vllm.magedu.com" \
         -d "{
             \"model\": \"qwen3-8b\",
             \"prompt\": \"${SHARED_PREFIX}${prompt_suffix}\",
@@ -49,6 +50,7 @@ test_request "测试 2：相同前缀（预期 Cache Hit）" "What are the main 
 echo "========== 测试 3：完全不同前缀（预期 Cache Miss） =========="
 response=$(curl -s -w "\n%{time_starttransfer}\n%{http_code}" \
     -H "Content-Type: application/json" \
+    -H "Host: vllm.magedu.com" \
     -d '{
         "model": "qwen3-8b",
         "prompt": "Tell me a joke about Kubernetes and containers.",

@@ -22,7 +22,6 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
-    spec:
       # ========== 反亲和性放宽：优先分散，允许同节点共享 GPU ==========
       affinity:
         podAntiAffinity:
@@ -65,11 +64,11 @@ spec:
         #image: vllm/vllm-openai:v0.11.2
         image: lmcache/vllm-openai:v0.3.15
         args:
-          - /data/models/qwen3-8b-awq
+          - /data/models/qwen3-8b
           - --served-model-name
           - qwen3-8b
-          - --quantization
-          - "awq"
+          - --dtype
+          - bfloat16
           - --tensor-parallel-size
           - "1"
           - --max-model-len
@@ -80,7 +79,7 @@ spec:
           - "16"  # <-- 降低：共享场景下保守并发
           - --enable-chunked-prefill
           - --gpu-memory-utilization
-          - "0.45"  # <-- 降低：单实例约 10.8GB，双实例总和 < 24GB
+          - "0.85"
           - --host
           - 0.0.0.0
           - --port

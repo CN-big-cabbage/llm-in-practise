@@ -1,13 +1,69 @@
 # K8s上的LLM推理服务
 
-**示例环境说明**：
+## 快速开始
 
+### 第一步：克隆仓库
+
+本仓库是原课程仓库（[iKubernetes/llm-in-practise](https://github.com/iKubernetes/llm-in-practise)）的 fork，YAML 配置已针对 **2 节点云上 GPU 集群**做了适配修正（修复了 `maxSurge`、Prometheus 地址、镜像源等问题）。
+
+```bash
+git clone https://github.com/CN-big-cabbage/llm-in-practise.git
+cd llm-in-practise/LLM_on_Kubernetes
+```
+
+> 如果你想基于原课程官方版本，使用：`git clone https://github.com/iKubernetes/llm-in-practise.git`
+> 但实操命令请参考 `Inference_Platfrom/PRACTICE_GUIDE.md`，原课程 YAML 可能需要调整。
+
+### 第二步：选择入口
+
+---
+
+## 文档地图（从这里开始）
+
+```
+LLM_on_Kubernetes/
+├── README.md                          ← 当前文件：概念参考手册（原课程 3 节点环境）
+├── bootstrap/
+│   └── README.md                      ← 集群搭建：混合架构（本地 PVE + 云端 GPU）
+└── Inference_Platfrom/
+    ├── PRACTICE_GUIDE.md              ← ★ 实操手册（推荐从这里开始）★
+    ├── PRACTICE_PLAN.md               ← 阶段规划速览
+    ├── README.md                      ← 概念详解（与本文档互补）
+    ├── 01-Base/ … 09-Canary-Deployment/  ← 各阶段 YAML 文件
+    └── Open-WebUI/                    ← Web UI 部署文件
+```
+
+### 我应该看哪个文档？
+
+| 我的目标 | 推荐文档 |
+|---|---|
+| **复现完整实操，直接跑命令** | [`Inference_Platfrom/PRACTICE_GUIDE.md`](Inference_Platfrom/PRACTICE_GUIDE.md) |
+| 搭建 K8s 集群（PVE + 云端 GPU 混合） | [`bootstrap/README.md`](bootstrap/README.md) |
+| 理解 GPU Operator 原理、MinIO 模型管理 | 本文件（往下看） |
+| 了解各阶段技术背景和架构图 | [`Inference_Platfrom/README.md`](Inference_Platfrom/README.md) |
+
+---
+
+## 实践环境说明（参考）
+
+本项目在以下两类环境中验证通过：
+
+**环境 A：课程参考环境（本文档描述）**
 - Kubernetes集群：v1.35.4
   - Master 1个：k8s-master01.magedu.com
   - Worker 3个：k8s-node{01-03}.magedu.com，其中k8s-node01和k8s-node03上各有RTX 3090 GPU一块
 - Containerd：v2.2.3
 - Ingress Controller：Ingress-Nginx
 - CSI Storage：OpenEBS 4.x
+
+**环境 B：云端 2 节点实操环境（PRACTICE_GUIDE.md 描述）**
+- Kubernetes v1.31.4，master + node01 各 1 张 RTX 3090（24G），GPU Time-Slicing 虚拟为 4 个槽位
+- vLLM v0.11.2 + bitsandbytes int8 量化（每 Pod ~8GB）
+- KEDA + Argo Rollouts + Prometheus + Open-WebUI 全套组件
+
+---
+
+**原课程示例环境说明**：
 - LoadBalancer Service：MetalLB
 
 ## 前置准备

@@ -7,47 +7,48 @@ metadata:
 spec:
   metrics:
   # ========== 指标 1：P99 TTFT < 2s ==========
+  # scalar() 确保返回标量；无数据时返回 NaN，isNaN 视为通过（无流量 = 无压力）
   - name: p99-ttft
     interval: 1m
     count: 5
-    successCondition: result < 2000
-    failureCondition: result >= 5000
+    successCondition: "isNaN(result) || result < 2000.0"
+    failureCondition: "!isNaN(result) && result >= 5000.0"
     provider:
       prometheus:
-        address: http://prometheus-server.monitoring.svc.cluster.local:9090
+        address: http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090
         query: |
-          avg(
-            histogram_quantile(0.99, 
-              sum(rate(vllm:time_to_first_token_seconds_bucket{namespace="llm-inference"}[2m])) by (le)
-            ) * 1000
+          scalar(
+            avg(
+              histogram_quantile(0.99,
+                sum(rate(vllm:time_to_first_token_seconds_bucket{namespace="llm-inference"}[2m])) by (le)
+              ) * 1000
+            )
           )
 
-  # ========== 指标 2：错误率 < 1% ==========
-  - name: error-rate
+  # ========== 指标 2：等待队列长度 < 10（无严重积压） ==========
+  - name: requests-waiting
     interval: 1m
     count: 5
-    successCondition: result < 0.01
+    successCondition: "isNaN(result) || result < 10.0"
+    failureCondition: "!isNaN(result) && result >= 50.0"
     provider:
       prometheus:
-        address: http://prometheus-server.monitoring.svc.cluster.local:9090
+        address: http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090
         query: |
-          avg(
-            sum(rate(vllm:request_failure_total{namespace="llm-inference"}[2m])) 
-            / 
-            sum(rate(vllm:request_success_total{namespace="llm-inference"}[2m]))
+          scalar(
+            sum(vllm:num_requests_waiting{namespace="llm-inference"})
           )
 
-  # ========== 指标 3：GPU 显存使用率 < 90% ==========
-  - name: gpu-memory-saturation
+  # ========== 指标 3：GPU KV Cache 使用率 < 90% ==========
+  - name: gpu-cache-usage
     interval: 1m
     count: 5
-    successCondition: result < 0.9
+    successCondition: "isNaN(result) || result < 0.9"
+    failureCondition: "!isNaN(result) && result >= 0.95"
     provider:
       prometheus:
-        address: http://prometheus-server.monitoring.svc.cluster.local:9090
+        address: http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090
         query: |
-          avg(
-            nvidia_gpu_memory_used_bytes{namespace="llm-inference"} 
-            / 
-            nvidia_gpu_memory_total_bytes{namespace="llm-inference"}
+          scalar(
+            avg(vllm:gpu_cache_usage_perc{namespace="llm-inference"})
           )

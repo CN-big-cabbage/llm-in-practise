@@ -15,9 +15,9 @@ spec:
     canary:
       canaryService: vllm-canary
       stableService: vllm-stable
-      # 关键：限制 canary 同时运行的最大数量，防止超量占用 GPU
-      maxSurge: "25%"        # 基于 replicas 的百分比，3*25% = 0.75 → 向上取整为 1
-      maxUnavailable: 1      # 允许 1 个 stable Pod 不可用，确保 canary 能调度
+      # bitsandbytes int8：每 Pod ~8GB，2 Pod 共享 24GB GPU 可行
+      maxSurge: 1            # 必须写整数！"25%" → 3*0.25=0.75 向下取整=0，canary 永远不起
+      maxUnavailable: 0      # 保持 stable 全部可用，等 canary 就绪后再缩
       trafficRouting:
         nginx:
           stableIngress: vllm-stable
@@ -88,19 +88,19 @@ spec:
       - name: vllm
         image: vllm/vllm-openai:v0.11.2
         args:
-          - /data/models/qwen3-8b-awq
+          - /data/models/qwen3-8b
           - --served-model-name
           - qwen3-8b
-          - --quantization 
-          - "awq"
+          - --quantization
+          - bitsandbytes
           - --tensor-parallel-size
           - "1"
           - --max-model-len
-          - "2048"
+          - "4096"
           - --max-num-batched-tokens
           - "4096"
           - --max-num-seqs
-          - "8"
+          - "16"
           - --enable-chunked-prefill
           - --enable-prefix-caching
           - --gpu-memory-utilization

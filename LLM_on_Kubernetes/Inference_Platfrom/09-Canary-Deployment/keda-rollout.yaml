@@ -11,7 +11,7 @@ spec:
   pollingInterval: 15
   cooldownPeriod: 300
   minReplicaCount: 1
-  maxReplicaCount: 4  # 匹配 4 逻辑 GPU
+  maxReplicaCount: 4  # 时间切片 4 虚拟 GPU，bitsandbytes int8 每 Pod ~8GB
   fallback:
     failureThreshold: 3
     replicas: 1
@@ -35,14 +35,14 @@ spec:
   triggers:
   - type: prometheus
     metadata:
-      serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+      serverAddress: http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090
       metricName: vllm-num-requests-waiting
       query: |
         sum(vllm:num_requests_waiting{namespace="llm-inference"})
       threshold: "2"
   - type: prometheus
     metadata:
-      serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+      serverAddress: http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090
       metricName: vllm-p99-ttft-ms
       query: |
         histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket{namespace="llm-inference"}[2m])) by (le)) * 1000

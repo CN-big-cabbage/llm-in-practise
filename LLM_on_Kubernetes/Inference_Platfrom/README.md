@@ -1,16 +1,20 @@
 # LLM推理平台实践
 
-前提：实践环境说明
+> **想直接上手操作？** 跳转到 [**PRACTICE_GUIDE.md**](PRACTICE_GUIDE.md) — 这是基于真实 2 节点云集群的完整实操手册，包含 10 个阶段的逐步命令、验证方法和踩坑记录。
+>
+> 本文件是**概念详解 + 架构参考**，适合理解各阶段的设计原理，但描述的是课程参考 3 节点环境，命令需根据自己的环境调整。
 
-- 系统环境：Ubuntu 2404 Server
+---
+
+## 参考环境说明
+
+- 系统环境：Ubuntu 22.04 Server
 - Kubernetes集群环境（v1.35）：有三个worker，其中两个节点有RTX 3090 GPU (k8s-node01.magedu.com和k8s-node03.magedu.com)
-- Ingress Controller：Ingress-Nginx，使用的对外域名为“magedu.com”
-- MinIO：服务入口为minio.minio.svc.cluster.local:9000；
+- Ingress Controller：Ingress-Nginx，使用的对外域名为”magedu.com”
+- MinIO：服务入口为minio.minio.svc.cluster.local:9000
 - OpenEBS：支持LocalPV，相关的StorageClass为openebs-local 
-- Prometheus（包括PushGateway、Blackbox-Exporter、Node-Exporter、AlertManager等组件）：Prometheus的服务接口为http://prometheus.monitoring.svc.cluster.local，并支持通过http://prometheus.magedu.com在集群外部访问；
+- Prometheus（包括PushGateway、Blackbox-Exporter、Node-Exporter、AlertManager等组件）：Prometheus的服务接口为http://prometheus.monitoring.svc.cluster.local，并支持通过http://prometheus.magedu.com在集群外部访问
 - Helm 3.x
-
-
 
 特别说明，本示例中用到的vLLM为v0.11.2版本。
 
